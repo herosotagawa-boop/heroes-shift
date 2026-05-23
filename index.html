@@ -25,12 +25,12 @@
   // ★ ここにFirebaseの設定を貼り付けてください（SETUP.mdを参照）★
   // ============================================================
   window._appConfig = {
-    apiKey: "AIzaSyCpwyrsNxCNUaKiDCDQnEcXCDnOWZkD2x0",
-    authDomain: "heros-shift.firebaseapp.com",
-    projectId: "heros-shift",
-    storageBucket: "heros-shift.firebasestorage.app",
+    apiKey:            "AIzaSyCpwyrsNxCNUaKiDCDQnEcXCDnOWZkD2x0",
+    authDomain:        "heros-shift.firebaseapp.com",
+    projectId:         "heros-shift",
+    storageBucket:     "heros-shift.firebasestorage.app",
     messagingSenderId: "1094386502748",
-    appId: "1:1094386502748:web:d9b3f5332605f71184ea99"
+    appId:             "1:1094386502748:web:d9b3f5332605f71184ea99"
   };
   // ============================================================
   firebase.initializeApp(window._appConfig);
@@ -73,14 +73,26 @@ const instIdFrom = m  => m.split('@')[0].replace('inst_','');
 const adminLogin    = (email,pw) => auth.signInWithEmailAndPassword(email,pw);
 const adminRegister = (email,pw) => auth.createUserWithEmailAndPassword(email,pw);
 
-// 講師 Auth アカウント作成（セカンダリアプリ経由 → 管理者セッションを維持）
+// 講師 Auth アカウント作成（REST API経由 → 管理者セッションに一切影響しない）
 const createInstAuth = async (instId, pw) => {
-  const name = `tmp${Date.now()}`;
-  const tmpApp = firebase.initializeApp(window._appConfig, name);
-  try {
-    await tmpApp.auth().createUserWithEmailAndPassword(instEmail(instId), pw);
-    await tmpApp.auth().signOut();
-  } finally { await tmpApp.delete(); }
+  const apiKey = window._appConfig.apiKey;
+  const res = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: instEmail(instId), password: pw, returnSecureToken: false})
+    }
+  );
+  const data = await res.json();
+  if (data.error) {
+    const msgs = {
+      'EMAIL_EXISTS':              'このIDは既に登録されています。削除してから再登録してください',
+      'WEAK_PASSWORD : Password should be at least 6 characters': 'パスワードは6文字以上にしてください',
+      'TOO_MANY_ATTEMPTS_TRY_LATER': 'しばらく時間をおいてから再試行してください',
+    };
+    throw new Error(msgs[data.error.message] || ('認証エラー: ' + data.error.message));
+  }
 };
 
 // 講師ログイン
@@ -349,7 +361,12 @@ function InstructorLogin({instructors,loading,onBack}){
           ?<div style={{textAlign:'center',color:'#bbb',padding:'32px',fontSize:'13px'}}>接続中...</div>
           :instructors.length===0
             ?<div style={{textAlign:'center',color:'#bbb',fontSize:'13px',padding:'32px 0',lineHeight:2}}>
-               まだ講師が登録されていません<br/><span style={{color:GOLD,fontWeight:'600'}}>管理者が登録</span>してください
+               まだ講師が登録されていません<br/>
+               <span style={{color:GOLD,fontWeight:'600'}}>管理者が登録</span>してください<br/>
+               <button onClick={()=>window.location.reload()}
+                 style={{marginTop:'12px',padding:'8px 20px',borderRadius:'8px',background:'#f0f0f0',border:'none',cursor:'pointer',fontSize:'12px',color:'#666',fontWeight:'600'}}>
+                 🔄 再読み込み
+               </button>
              </div>
             :<div style={{display:'flex',flexDirection:'column',gap:'8px',marginBottom:'20px'}}>
                {instructors.map(inst=>(
@@ -1079,13 +1096,24 @@ function App(){
     return ()=>u();
   },[]);
 
-  // 講師一覧をリアルタイム取得
+  // 講師一覧をリアルタイム取得（認証状態が変わるたびに再試行）
   useEffect(()=>{
-    const u = db.collection('instructors').orderBy('createdAt')
-      .onSnapshot(snap=>{setInsts(snap.docs.map(d=>({id:d.id,...d.data()})));setInstsOK(true);}
-      ,()=>setInstsOK(true));
-    return()=>u();
-  },[]);
+    let unsub = null;
+    const startListen = () => {
+      if(unsub) unsub();
+      unsub = db.collection('instructors').orderBy('createdAt')
+        .onSnapshot(
+          snap=>{setInsts(snap.docs.map(d=>({id:d.id,...d.data()})));setInstsOK(true);},
+          err=>{
+            // 未認証エラー(permission-denied)の場合はinstsLoadedをfalseのまま維持して再試行待ち
+            if(err.code==='permission-denied'){setInstsOK(false);}
+            else{setInstsOK(true);}
+          }
+        );
+    };
+    startListen();
+    return()=>{ if(unsub) unsub(); };
+  },[authUser]);  // authUserが変わるたびに再取得
 
   const handleLogout = async () => { await signOut(); setLoginPage('landing'); };
 
@@ -1102,7 +1130,10 @@ function App(){
     if(!instsLoaded) return <Spinner/>;
     const instId = instIdFrom(authUser.email);
     const instructor = instructors.find(i=>i.id===instId);
-    if(!instructor){ signOut(); return <Spinner/>; }
+    // データがまだ読み込まれていない場合はSpinnerで待つ（即サインアウトしない）
+    if(!instructor && !instsLoaded){ return <Spinner/>; }
+    // データ読込済みなのに見つからない場合のみサインアウト
+    if(!instructor && instsLoaded){ signOut(); return <Spinner/>; }
     let off=0; while(isLocked(off)&&off<4) off++;
     const initOffset = isLocked(off)?1:off;
     return <InstructorView instructor={instructor} weekOffset={weekOffset||initOffset} onWeekChange={setWeek} onLogout={handleLogout}/>;
