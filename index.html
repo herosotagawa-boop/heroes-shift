@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>シフト管理 - HEROES 太田川校</title>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+    body{font-family:-apple-system,'Hiragino Sans','Noto Sans JP',sans-serif;background:#fafaf8;}
+    button,input{font-family:inherit;}
+    ::-webkit-scrollbar{display:none;}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // ============================================================
+  // ★ ここにFirebaseの設定を貼り付けてください（SETUP.mdを参照）★
+  // ============================================================
+  window._appConfig = {
+    apiKey: "AIzaSyCpwyrsNxCNUaKiDCDQnEcXCDnOWZkD2x0",
+    authDomain: "heros-shift.firebaseapp.com",
+    projectId: "heros-shift",
+    storageBucket: "heros-shift.firebasestorage.app",
+    messagingSenderId: "1094386502748",
+    appId: "1:1094386502748:web:d9b3f5332605f71184ea99"
+  };
+  // ============================================================
+  firebase.initializeApp(window._appConfig);
+  const db   = firebase.firestore();
+  const auth = firebase.auth();
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ── 定数 ────────────────────────────────────────────────────────
+const DAYS  = ['月','火','水','木','金','土','日'];
+const SLOTS = ['14:00','15:00','16:00','17:00','18:00','19:00','20:00','21:00'];
+const GOLD  = '#c9a84c';
+const DARK  = '#1a1a1a';
+
+// ── 日付ヘルパー ─────────────────────────────────────────────────
+function getMonday(offset=0){
+  const now=new Date(),d=now.getDay(),m=new Date(now);
+  m.setDate(now.getDate()-(d===0?6:d-1)+offset*7);m.setHours(0,0,0,0);return m;
+}
+function weekDates(offset){
+  const mon=getMonday(offset);
+  return Array.from({length:7},(_,i)=>{const d=new Date(mon);d.setDate(mon.getDate()+i);return d;});
+}
+function weekKey(offset){
+  const d=getMonday(offset);return `wk-${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+}
+function fmt(d){return `${d.getMonth()+1}/${d.getDate()}`;}
+function getDeadline(o){const m=getMonday(o),w=new Date(m);w.setDate(m.getDate()-5);w.setHours(23,59,59,999);return w;}
+function isLocked(o){return new Date()>getDeadline(o);}
+function deadlineStr(o){const d=getDeadline(o);return `${d.getMonth()+1}/${d.getDate()}（水）23:59`;}
+
+// ── Auth ヘルパー ────────────────────────────────────────────────
+const instEmail  = id => `inst_${id}@heroes-shift.app`;
+const isInstMail = m  => m && m.endsWith('@heroes-shift.app');
+const instIdFrom = m  => m.split('@')[0].replace('inst_','');
+
+// 管理者用 Auth 操作
+const adminLogin    = (email,pw) => auth.signInWithEmailAndPassword(email,pw);
+const adminRegister = (email,pw) => auth.createUserWithEmailAndPassword(email,pw);
+
+// 講師 Auth アカウント作成（セカンダリアプリ経由 → 管理者セッションを維持）
+const createInstAuth = async (instId, pw) => {
+  const name = `tmp${Date.now()}`;
+  const tmpApp = firebase.initializeApp(window._appConfig, name);
+  try {
+    await tmpApp.auth().createUserWithEmailAndPassword(instEmail(instId), pw);
+    await tmpApp.auth().signOut();
+  } finally { await tmpApp.delete(); }
+};
+
+// 講師ログイン
+const instLogin = (instId, pw) => auth.signInWithEmailAndPassword(instEmail(instId), pw);
+
+// 講師パスワード変更（再認証が必要）
+const changeInstPw = async (instId, curPw, newPw) => {
+  const cred = firebase.auth.EmailAuthProvider.credential(instEmail(instId), curPw);
+  await auth.currentUser.reauthenticateWithCredential(cred);
+  await auth.currentUser.updatePassword(newPw);
+};
+
+const signOut = () => auth.signOut();
+
+// ── Firestore ────────────────────────────────────────────────────
+const TS = () => firebase.firestore.FieldValue.serverTimestamp();
+const fs = {
+  addInstructor:    (name) => db.collection('instructors').add({name,defaults:{},createdAt:TS()}),
+  deleteInstructor: (id)   => db.collection('instructors').doc(id).delete(),
+  saveDefaults:     (id,v) => db.collection('instructors').doc(id).set({defaults:v},{merge:true}),
+  saveAvailability: (wk,instId,slots) => db.collection('weekData').doc(wk).collection('availability').doc(instId).set({slots}),
+  setRequest: async (wk,requests,key,ids) => {
+    const next={...requests};
+    if(!ids||ids.length===0)delete next[key];else next[key]=ids;
+    await db.collection('weekData').doc(wk).set({requests:next},{merge:true});
+    return next;
+  },
+  copyRequests: async (fromWk,toWk) => {
+    const doc=await db.collection('weekData').doc(fromWk).get();
+    const r=doc.exists?(doc.data().requests||{}):{};
+    await db.collection('weekData').doc(toWk).set({requests:r},{merge:true});
+    return r;
+  },
+  saveConfirmed:    (wk,c) => db.collection('weekData').doc(wk).set({confirmed:c},{merge:true}),
+  setWeekConfirmed: (wk,v) => db.collection('weekData').doc(wk).set({isConfirmed:v},{merge:true}),
+};
+
+// ── 共通 UI ──────────────────────────────────────────────────────
+function Spinner(){
+  return(
+    <div style={{minHeight:'100svh',display:'flex',alignItems:'center',justifyContent:'center',background:'#fafaf8'}}>
+      <div style={{textAlign:'center'}}>
+        <div style={{fontSize:'10px',letterSpacing:'4px',color:GOLD,fontWeight:'700',textTransform:'uppercase',marginBottom:'12px'}}>HEROES 太田川校</div>
+        <div style={{color:'#ccc',fontSize:'13px'}}>接続中...</div>
+      </div>
+    </div>
+  );
+}
+
+function WeekNav({weekOffset,onChange,onBack,title,subtitle,onLogout}){
+  const dates=weekDates(weekOffset);
+  return(
+    <div style={{background:'white',borderBottom:'1px solid #eee',position:'sticky',top:0,zIndex:20,boxShadow:'0 1px 8px rgba(0,0,0,0.06)'}}>
+      <div style={{display:'flex',alignItems:'center',padding:'12px 14px 8px',gap:'8px'}}>
+        <button onClick={onBack} style={{background:'none',border:'none',fontSize:'22px',cursor:'pointer',color:'#888',padding:'4px',lineHeight:1}}>←</button>
+        <div style={{flex:1}}>
+          <div style={{fontWeight:'800',fontSize:'15px',color:DARK}}>{title}</div>
+          {subtitle&&<div style={{fontSize:'11px',color:GOLD,fontWeight:'600'}}>{subtitle}</div>}
+        </div>
+        {onLogout&&(
+          <button onClick={onLogout}
+            style={{background:'#f4f4f4',border:'none',borderRadius:'8px',padding:'6px 12px',cursor:'pointer',fontSize:'12px',color:'#888',fontWeight:'600'}}>
+            ログアウト
+          </button>
+        )}
+      </div>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'4px 14px 12px'}}>
+        <button onClick={()=>onChange(weekOffset-1)} style={{background:'#f4f4f4',border:'none',borderRadius:'8px',padding:'6px 12px',cursor:'pointer',fontSize:'14px',color:'#555',fontWeight:'700'}}>◀ 前週</button>
+        <div style={{textAlign:'center'}}>
+          <div style={{fontSize:'13px',fontWeight:'700',color:'#333'}}>{fmt(dates[0])} 〜 {fmt(dates[6])}</div>
+          {weekOffset===0&&<div style={{fontSize:'10px',color:GOLD,fontWeight:'600'}}>今週</div>}
+        </div>
+        <button onClick={()=>onChange(weekOffset+1)} style={{background:'#f4f4f4',border:'none',borderRadius:'8px',padding:'6px 12px',cursor:'pointer',fontSize:'14px',color:'#555',fontWeight:'700'}}>翌週 ▶</button>
+      </div>
+    </div>
+  );
+}
+
+function SimpleNav({onBack,title,subtitle}){
+  return(
+    <div style={{background:'white',borderBottom:'1px solid #eee',position:'sticky',top:0,zIndex:20,boxShadow:'0 1px 8px rgba(0,0,0,0.06)',minHeight:'56px',display:'flex',alignItems:'center',padding:'0 14px',gap:'8px'}}>
+      <button onClick={onBack} style={{background:'none',border:'none',fontSize:'22px',cursor:'pointer',color:'#888',padding:'4px',lineHeight:1,flexShrink:0}}>←</button>
+      <div>
+        <div style={{fontWeight:'800',fontSize:'15px',color:DARK}}>{title}</div>
+        {subtitle&&<div style={{fontSize:'11px',color:GOLD,fontWeight:'600'}}>{subtitle}</div>}
+      </div>
+    </div>
+  );
+}
+
+function GridHeader({dates}){
+  return(
+    <thead><tr>
+      <th style={{width:'42px',padding:'4px 6px 4px 0',textAlign:'right',fontSize:'10px',color:'#bbb',fontWeight:'normal'}}></th>
+      {dates.map((d,i)=>(
+        <th key={i} style={{padding:'4px 2px',textAlign:'center',fontSize:'11px',fontWeight:'700',color:i>=5?'#3b82f6':'#333',width:'40px',minWidth:'38px'}}>
+          <div>{DAYS[i]}</div><div style={{fontWeight:'400',color:'#bbb',fontSize:'10px'}}>{fmt(d)}</div>
+        </th>
+      ))}
+    </tr></thead>
+  );
+}
+
+function DayHeader(){
+  return(
+    <thead><tr>
+      <th style={{width:'42px',padding:'4px 6px 4px 0',textAlign:'right',fontSize:'10px',color:'#bbb',fontWeight:'normal'}}></th>
+      {DAYS.map((d,i)=>(
+        <th key={i} style={{padding:'4px 2px',textAlign:'center',fontSize:'11px',fontWeight:'700',color:i>=5?'#3b82f6':'#333',width:'40px',minWidth:'38px'}}>{d}</th>
+      ))}
+    </tr></thead>
+  );
+}
+
+function Section({color,label,bg,border,insts}){
+  return(
+    <div style={{marginBottom:'8px'}}>
+      <div style={{fontSize:'11px',fontWeight:'700',color,marginBottom:'4px'}}>{label}</div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
+        {insts.map(i=><span key={i.id} style={{background:bg,color,borderRadius:'20px',padding:'4px 10px',fontSize:'12px',fontWeight:'600',border:border||'none'}}>{i.name}</span>)}
+      </div>
+    </div>
+  );
+}
+
+// ── Landing ──────────────────────────────────────────────────────
+function Landing({onAdmin,onInstructor}){
+  return(
+    <div style={{minHeight:'100svh',background:'#fafaf8',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'24px 20px'}}>
+      <div style={{marginBottom:'48px',textAlign:'center'}}>
+        <div style={{fontSize:'10px',letterSpacing:'4px',color:GOLD,fontWeight:'700',textTransform:'uppercase',marginBottom:'10px'}}>HEROES 太田川校</div>
+        <div style={{fontSize:'28px',fontWeight:'900',color:DARK,letterSpacing:'-1px',lineHeight:1}}>シフト管理</div>
+        <div style={{width:'40px',height:'3px',background:GOLD,margin:'12px auto 0',borderRadius:'2px'}}></div>
+      </div>
+      <div style={{width:'100%',maxWidth:'300px',display:'flex',flexDirection:'column',gap:'14px'}}>
+        <button onClick={onAdmin}
+          style={{padding:'20px 18px',borderRadius:'14px',fontWeight:'800',fontSize:'16px',background:DARK,color:'white',border:'none',cursor:'pointer',
+            display:'flex',alignItems:'center',gap:'14px',boxShadow:'0 4px 16px rgba(0,0,0,0.15)'}}>
+          <span style={{fontSize:'26px'}}>🔑</span>
+          <div style={{textAlign:'left'}}><div>管理者</div><div style={{fontSize:'11px',fontWeight:'500',opacity:0.65,marginTop:'3px'}}>シフト管理・確定</div></div>
+        </button>
+        <button onClick={onInstructor}
+          style={{padding:'20px 18px',borderRadius:'14px',fontWeight:'800',fontSize:'16px',background:GOLD,color:'white',border:'none',cursor:'pointer',
+            display:'flex',alignItems:'center',gap:'14px',boxShadow:'0 4px 16px rgba(201,168,76,0.3)'}}>
+          <span style={{fontSize:'26px'}}>👤</span>
+          <div style={{textAlign:'left'}}><div>講師</div><div style={{fontSize:'11px',fontWeight:'500',opacity:0.8,marginTop:'3px'}}>シフト入力・確認</div></div>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── AdminLogin ───────────────────────────────────────────────────
+function AdminLogin({onBack}){
+  const [email,setEmail]   = useState('');
+  const [pw,setPw]         = useState('');
+  const [err,setErr]       = useState('');
+  const [mode,setMode]     = useState('login'); // 'login' | 'register'
+  const [loading,setLoading]= useState(false);
+
+  const errMsg = code => ({
+    'auth/user-not-found':    'アカウントが見つかりません',
+    'auth/wrong-password':    'パスワードが違います',
+    'auth/invalid-email':     'メールアドレスの形式が正しくありません',
+    'auth/email-already-in-use': 'このメールアドレスは既に使用されています',
+    'auth/weak-password':     'パスワードは6文字以上にしてください',
+    'auth/invalid-credential':'メールアドレスまたはパスワードが違います',
+  }[code] || '認証に失敗しました');
+
+  const submit = async () => {
+    if(!email.trim()||!pw){setErr('メールアドレスとパスワードを入力してください');return;}
+    setLoading(true);setErr('');
+    try {
+      if(mode==='login') await adminLogin(email.trim(),pw);
+      else               await adminRegister(email.trim(),pw);
+      // auth state change → App re-renders automatically
+    } catch(e){ setErr(errMsg(e.code)); }
+    finally{ setLoading(false); }
+  };
+
+  return(
+    <div style={{minHeight:'100svh',background:'#fafaf8'}}>
+      <div style={{background:'white',borderBottom:'1px solid #eee',minHeight:'56px',display:'flex',alignItems:'center',padding:'0 14px',gap:'8px',boxShadow:'0 1px 8px rgba(0,0,0,0.06)'}}>
+        <button onClick={onBack} style={{background:'none',border:'none',fontSize:'22px',cursor:'pointer',color:'#888',padding:'4px'}}>←</button>
+        <div>
+          <div style={{fontWeight:'800',fontSize:'15px',color:DARK}}>管理者ログイン</div>
+          <div style={{fontSize:'11px',color:GOLD,fontWeight:'600'}}>HEROES 太田川校</div>
+        </div>
+      </div>
+
+      <div style={{padding:'32px 20px',maxWidth:'360px',margin:'0 auto'}}>
+        <div style={{display:'flex',gap:'8px',marginBottom:'24px'}}>
+          {['login','register'].map(m=>(
+            <button key={m} onClick={()=>{setMode(m);setErr('');}}
+              style={{flex:1,padding:'10px',borderRadius:'10px',fontWeight:'700',fontSize:'13px',
+                background:mode===m?DARK:'#f0f0f0',color:mode===m?'white':'#888',border:'none',cursor:'pointer'}}>
+              {m==='login'?'ログイン':'初回アカウント作成'}
+            </button>
+          ))}
+        </div>
+
+        <input type="email" value={email} onChange={e=>{setEmail(e.target.value);setErr('');}}
+          onKeyDown={e=>e.key==='Enter'&&submit()}
+          placeholder="メールアドレス"
+          style={{width:'100%',padding:'13px 16px',borderRadius:'12px',border:'1.5px solid #e8e8e8',fontSize:'15px',outline:'none',marginBottom:'12px',color:DARK}}/>
+        <input type="password" value={pw} onChange={e=>{setPw(e.target.value);setErr('');}}
+          onKeyDown={e=>e.key==='Enter'&&submit()}
+          placeholder="パスワード（6文字以上）"
+          style={{width:'100%',padding:'13px 16px',borderRadius:'12px',border:'1.5px solid #e8e8e8',fontSize:'15px',outline:'none',marginBottom:'16px',color:DARK}}/>
+
+        {err&&<div style={{color:'#dc2626',fontSize:'13px',marginBottom:'14px',fontWeight:'600'}}>{err}</div>}
+
+        <button onClick={submit} disabled={loading}
+          style={{width:'100%',padding:'15px',borderRadius:'12px',background:loading?'#888':DARK,color:'white',border:'none',
+            cursor:loading?'default':'pointer',fontWeight:'800',fontSize:'16px',boxShadow:'0 4px 16px rgba(0,0,0,0.15)'}}>
+          {loading?'処理中...':(mode==='login'?'ログイン →':'アカウントを作成 →')}
+        </button>
+
+        {mode==='register'&&(
+          <div style={{marginTop:'14px',padding:'12px 14px',background:'#fef9ec',borderRadius:'10px',fontSize:'11px',color:'#8a6e1a',lineHeight:'1.8',border:'1px solid #f0d980'}}>
+            このメールアドレスと<br/>パスワードが管理者の認証情報になります。<br/>大切に保管してください。
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── InstructorLogin ──────────────────────────────────────────────
+function InstructorLogin({instructors,loading,onBack}){
+  const [sel,setSel]     = useState(null);
+  const [pw,setPw]       = useState('');
+  const [err,setErr]     = useState('');
+  const [busy,setBusy]   = useState(false);
+  const pwRef            = useRef(null);
+
+  const select = inst => { setSel(inst); setPw(''); setErr(''); setTimeout(()=>pwRef.current?.focus(),100); };
+
+  const login = async () => {
+    if(!sel||!pw){ setErr('パスワードを入力してください'); return; }
+    setBusy(true); setErr('');
+    try {
+      await instLogin(sel.id, pw);
+      // auth state change → App re-renders automatically
+    } catch(e) {
+      setErr(e.code==='auth/wrong-password'||e.code==='auth/invalid-credential'
+        ?'パスワードが違います'
+        :'ログインに失敗しました。パスワードを確認してください');
+    }
+    setBusy(false);
+  };
+
+  return(
+    <div style={{minHeight:'100svh',background:'#fafaf8'}}>
+      <div style={{background:'white',borderBottom:'1px solid #eee',minHeight:'56px',display:'flex',alignItems:'center',padding:'0 14px',gap:'8px',boxShadow:'0 1px 8px rgba(0,0,0,0.06)'}}>
+        <button onClick={onBack} style={{background:'none',border:'none',fontSize:'22px',cursor:'pointer',color:'#888',padding:'4px'}}>←</button>
+        <div>
+          <div style={{fontWeight:'800',fontSize:'15px',color:DARK}}>講師ログイン</div>
+          <div style={{fontSize:'11px',color:GOLD,fontWeight:'600'}}>HEROES 太田川校</div>
+        </div>
+      </div>
+
+      <div style={{padding:'24px 16px'}}>
+        <div style={{fontSize:'13px',fontWeight:'700',color:'#666',marginBottom:'12px'}}>名前を選んでください</div>
+        {loading
+          ?<div style={{textAlign:'center',color:'#bbb',padding:'32px',fontSize:'13px'}}>接続中...</div>
+          :instructors.length===0
+            ?<div style={{textAlign:'center',color:'#bbb',fontSize:'13px',padding:'32px 0',lineHeight:2}}>
+               まだ講師が登録されていません<br/><span style={{color:GOLD,fontWeight:'600'}}>管理者が登録</span>してください
+             </div>
+            :<div style={{display:'flex',flexDirection:'column',gap:'8px',marginBottom:'20px'}}>
+               {instructors.map(inst=>(
+                 <button key={inst.id} onClick={()=>select(inst)}
+                   style={{padding:'14px 18px',borderRadius:'12px',textAlign:'left',fontWeight:'700',fontSize:'15px',
+                     color:sel?.id===inst.id?'white':DARK,
+                     background:sel?.id===inst.id?DARK:'white',
+                     border:sel?.id===inst.id?`2px solid ${DARK}`:'1.5px solid #e8e8e8',cursor:'pointer',boxShadow:'0 2px 8px rgba(0,0,0,0.04)'}}>
+                   {inst.name}
+                 </button>
+               ))}
+             </div>
+        }
+
+        {sel&&(
+          <div style={{background:'white',borderRadius:'14px',padding:'20px',boxShadow:'0 2px 12px rgba(0,0,0,0.08)',border:`2px solid ${DARK}`}}>
+            <div style={{fontSize:'14px',fontWeight:'700',color:DARK,marginBottom:'12px'}}>{sel.name} さん</div>
+            <input ref={pwRef} type="password" value={pw}
+              onChange={e=>{setPw(e.target.value);setErr('');}}
+              onKeyDown={e=>e.key==='Enter'&&login()}
+              placeholder="パスワードを入力"
+              style={{width:'100%',padding:'12px 14px',borderRadius:'10px',border:`1.5px solid ${err?'#dc2626':'#e8e8e8'}`,fontSize:'14px',outline:'none',color:DARK,marginBottom:err?'6px':'12px'}}/>
+            {err&&<div style={{color:'#dc2626',fontSize:'12px',marginBottom:'10px',fontWeight:'600'}}>{err}</div>}
+            <button onClick={login} disabled={busy}
+              style={{width:'100%',padding:'14px',borderRadius:'10px',background:busy?'#888':GOLD,color:'white',border:'none',
+                cursor:busy?'default':'pointer',fontWeight:'800',fontSize:'15px',boxShadow:'0 3px 12px rgba(201,168,76,0.3)'}}>
+              {busy?'ログイン中...':'ログイン →'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── AdminView ─────────────────────────────────────────────────────
+function AdminView({instructors,weekOffset,onWeekChange,onLogout}){
+  const [tab,setTab]          = useState('overview');
+  const [avail,setAvail]      = useState({});
+  const [requests,setReqs]    = useState({});
+  const [confirmed,setConf]   = useState({});
+  const [isConfirmed,setIsCon]= useState(false);
+  const [selCell,setSelCell]  = useState(null);
+  const dates = weekDates(weekOffset);
+
+  useEffect(()=>{
+    setAvail({});setReqs({});setConf({});setIsCon(false);setSelCell(null);
+    const wk=weekKey(weekOffset);
+    const u1=db.collection('weekData').doc(wk).onSnapshot(doc=>{
+      if(doc.exists){setReqs(doc.data().requests||{});setConf(doc.data().confirmed||{});setIsCon(!!doc.data().isConfirmed);}
+      else{setReqs({});setConf({});setIsCon(false);}
+    });
+    const u2=db.collection('weekData').doc(wk).collection('availability').onSnapshot(snap=>{
+      const a={};snap.docs.forEach(d=>{a[d.id]=d.data().slots||{};});setAvail(a);
+    });
+    return()=>{u1();u2();};
+  },[weekOffset]);
+
+  const reqIds = k => Array.isArray(requests[k])?requests[k]:[];
+
+  const cellInfo = (di,slot) => {
+    const k=`${di}-${slot}`;
+    return{k,
+      ok:   instructors.filter(i=>avail[i.id]?.[k]==='ok'),
+      ng:   instructors.filter(i=>avail[i.id]?.[k]==='ng'),
+      confIds: confirmed[k]||[],
+      confInsts: instructors.filter(i=>(confirmed[k]||[]).includes(i.id)),
+      reqIds: reqIds(k),
+      hasReq: reqIds(k).length>0,
+    };
+  };
+
+  const tabBtn=(t,label,icon)=>(
+    <button onClick={()=>{setTab(t);setSelCell(null);}}
+      style={{flex:1,padding:'9px 2px',fontSize:'10px',fontWeight:'700',
+        background:tab===t?DARK:'white',color:tab===t?'white':'#888',
+        border:'none',cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',gap:'2px'}}>
+      <span style={{fontSize:'15px'}}>{icon}</span>{label}
+    </button>
+  );
+
+  const handleLogout = async () => {
+    if(!window.confirm('ログアウトしますか？')) return;
+    await signOut();
+  };
+
+  const copyLastWeek = async () => {
+    if(!window.confirm('前週の希望設定をこの週にコピーしますか？')) return;
+    const r = await fs.copyRequests(weekKey(weekOffset-1),weekKey(weekOffset));
+    setReqs(r);
+  };
+
+  const setRequest = async (k,ids) => {
+    const next = await fs.setRequest(weekKey(weekOffset),requests,k,ids);
+    setReqs(next);
+  };
+
+  const toggleConf = async (k,instId) => {
+    const next={...confirmed};
+    const cur=next[k]||[];
+    next[k]=cur.includes(instId)?cur.filter(id=>id!==instId):[...cur,instId];
+    setConf(next); await fs.saveConfirmed(weekKey(weekOffset),next);
+  };
+
+  const confirmWeek = async () => {
+    if(Object.values(confirmed).flat().length===0){alert('確定するシフトがありません。');return;}
+    if(!window.confirm('このシフトを確定しますか？')) return;
+    await fs.setWeekConfirmed(weekKey(weekOffset),true);
+  };
+
+  return(
+    <div style={{minHeight:'100svh',background:'#f7f7f5',paddingBottom:'40px'}}>
+      <WeekNav weekOffset={weekOffset} onChange={onWeekChange} onBack={handleLogout}
+        title="管理者ダッシュボード" subtitle="HEROES 太田川校" onLogout={handleLogout}/>
+
+      {isConfirmed&&(
+        <div style={{background:'#dcfce7',padding:'10px 16px',textAlign:'center',fontSize:'12px',fontWeight:'700',color:'#16a34a',borderBottom:'1px solid #bbf7d0'}}>
+          ✅ このシフトは確定済みです
+        </div>
+      )}
+
+      <div style={{display:'flex',background:'white',borderBottom:'2px solid #eee',position:'sticky',top:'88px',zIndex:10}}>
+        {tabBtn('overview','シフト表','📋')}
+        {tabBtn('request','希望設定','⭐')}
+        {tabBtn('confirm','確定','✅')}
+        {tabBtn('manage','講師管理','👥')}
+      </div>
+
+      {/* ─── シフト表 ─── */}
+      {tab==='overview'&&(
+        <div style={{padding:'16px'}}>
+          <div style={{display:'flex',gap:'6px',marginBottom:'12px',flexWrap:'wrap'}}>
+            {[[GOLD,'金：確定'],['#16a34a','緑：入れる'],['#dc2626','赤：入れない']].map(([c,l])=>(
+              <div key={l} style={{background:'white',borderRadius:'8px',padding:'6px 10px',display:'flex',alignItems:'center',gap:'5px',fontSize:'11px',boxShadow:'0 1px 4px rgba(0,0,0,0.05)'}}>
+                <span style={{width:'8px',height:'8px',borderRadius:'50%',background:c,display:'inline-block'}}></span>
+                <span style={{color:'#666'}}>{l}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{background:'white',borderRadius:'14px',padding:'14px',overflowX:'auto',boxShadow:'0 2px 12px rgba(0,0,0,0.05)',marginBottom:'14px'}}>
+            <table style={{borderCollapse:'collapse',width:'100%',minWidth:'360px'}}>
+              <GridHeader dates={dates}/>
+              <tbody>
+                {SLOTS.map(slot=>(
+                  <tr key={slot}>
+                    <td style={{padding:'2px 8px 2px 0',textAlign:'right',fontSize:'10px',color:'#bbb',whiteSpace:'nowrap',verticalAlign:'middle'}}>{slot}</td>
+                    {dates.map((_,di)=>{
+                      const{k,ok,ng,confIds,hasReq}=cellInfo(di,slot);
+                      const isSel=selCell===k,hasConf=confIds.length>0;
+                      return(
+                        <td key={di} style={{padding:'2px'}}>
+                          <button onClick={()=>setSelCell(isSel?null:k)}
+                            style={{borderRadius:'7px',width:'100%',minHeight:'46px',padding:'2px',
+                              background:hasConf?'#fef9ec':(ok.length>0?'#f0fdf4':'#f5f5f5'),
+                              border:isSel?`2px solid ${DARK}`:(hasConf?`2px solid ${GOLD}`:(hasReq?`1.5px dashed ${GOLD}`:'2px solid transparent')),
+                              cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:'1px'}}>
+                            {hasConf&&<span style={{fontSize:'12px',fontWeight:'800',color:GOLD,lineHeight:1}}>{confIds.length}</span>}
+                            {!hasConf&&ok.length>0&&<span style={{fontSize:'12px',fontWeight:'800',color:'#16a34a',lineHeight:1}}>{ok.length}</span>}
+                            {ng.length>0&&<span style={{fontSize:'10px',color:'#dc2626',lineHeight:1}}>×{ng.length}</span>}
+                            {ok.length===0&&ng.length===0&&!hasConf&&<span style={{fontSize:'10px',color:'#ddd'}}>—</span>}
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {selCell&&(()=>{
+            const[diStr,slot]=selCell.split('-');const di=parseInt(diStr);
+            const{ok,ng,confInsts}=cellInfo(di,slot);
+            const unanswered=instructors.filter(i=>!avail[i.id]?.[selCell]);
+            return(
+              <div style={{background:'white',borderRadius:'14px',padding:'16px',boxShadow:'0 2px 12px rgba(0,0,0,0.06)',marginBottom:'14px'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}}>
+                  <span style={{fontWeight:'800',fontSize:'15px',color:DARK}}>{DAYS[di]}曜日 {slot}</span>
+                  <button onClick={()=>setSelCell(null)} style={{background:'none',border:'none',fontSize:'18px',color:'#bbb',cursor:'pointer'}}>✕</button>
+                </div>
+                {confInsts.length>0&&<Section color={GOLD} label={`✅ 確定（${confInsts.length}名）`} bg='#fef9ec' border={`1px solid ${GOLD}`} insts={confInsts}/>}
+                {ok.length>0&&<Section color='#16a34a' label={`○ 入れる（${ok.length}名）`} bg='#dcfce7' insts={ok}/>}
+                {ng.length>0&&<Section color='#dc2626' label={`× 入れない（${ng.length}名）`} bg='#fee2e2' insts={ng}/>}
+                {unanswered.length>0&&<Section color='#aaa' label={`— 未回答（${unanswered.length}名）`} bg='#f5f5f5' insts={unanswered}/>}
+              </div>
+            );
+          })()}
+          <div style={{fontSize:'12px',fontWeight:'700',color:'#888',marginBottom:'8px'}}>講師別サマリー</div>
+          {instructors.map(inst=>{
+            const av=avail[inst.id]||{};
+            const okC=Object.values(av).filter(v=>v==='ok').length;
+            const ngC=Object.values(av).filter(v=>v==='ng').length;
+            const cC=Object.values(confirmed).filter(ids=>ids.includes(inst.id)).length;
+            return(
+              <div key={inst.id} style={{background:'white',borderRadius:'11px',padding:'13px 16px',display:'flex',alignItems:'center',justifyContent:'space-between',boxShadow:'0 1px 6px rgba(0,0,0,0.04)',marginBottom:'8px'}}>
+                <span style={{fontWeight:'700',fontSize:'14px',color:DARK}}>{inst.name}</span>
+                <div style={{display:'flex',gap:'10px',fontSize:'12px'}}>
+                  <span style={{color:'#16a34a',fontWeight:'700'}}>○{okC}</span>
+                  <span style={{color:'#dc2626',fontWeight:'700'}}>×{ngC}</span>
+                  <span style={{color:GOLD,fontWeight:'700'}}>✅{cC}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {tab==='request'&&<RequestTab instructors={instructors} weekOffset={weekOffset} dates={dates} requests={requests} onSetRequest={setRequest} onCopyLastWeek={copyLastWeek}/>}
+      {tab==='confirm'&&<ConfirmTab instructors={instructors} weekOffset={weekOffset} dates={dates} avail={avail} confirmed={confirmed} isConfirmed={isConfirmed} onToggle={toggleConf} onConfirmWeek={confirmWeek}/>}
+      {tab==='manage'&&<ManageTab instructors={instructors}/>}
+    </div>
+  );
+}
+
+// ── RequestTab ─────────────────────────────────────────────────────
+function RequestTab({instructors,weekOffset,dates,requests,onSetRequest,onCopyLastWeek}){
+  const [selCell,setSel]=useState(null);
+  const reqIds  = k => Array.isArray(requests[k])?requests[k]:[];
+  const reqInsts= k => reqIds(k).map(id=>instructors.find(i=>i.id===id)).filter(Boolean);
+  const toggle  = (k,id) => { const c=reqIds(k); onSetRequest(k,c.includes(id)?c.filter(x=>x!==id):[...c,id]); };
+
+  return(
+    <div style={{padding:'16px'}}>
+      <button onClick={onCopyLastWeek}
+        style={{width:'100%',padding:'12px',borderRadius:'10px',marginBottom:'12px',background:'white',border:`1.5px solid ${GOLD}`,color:GOLD,fontWeight:'700',fontSize:'13px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:'8px'}}>
+        📋 前週の希望設定をコピー
+      </button>
+      <div style={{background:'#fef9ec',borderRadius:'10px',padding:'12px 14px',marginBottom:'14px',fontSize:'12px',color:'#8a6e1a',lineHeight:'1.7',border:'1px solid #f0d980'}}>
+        セルをタップして入ってほしい講師を指名できます。指名された講師の画面に⭐が表示されます。
+      </div>
+      <div style={{background:'white',borderRadius:'14px',padding:'14px',overflowX:'auto',boxShadow:'0 2px 12px rgba(0,0,0,0.05)',marginBottom:'14px'}}>
+        <table style={{borderCollapse:'collapse',width:'100%',minWidth:'360px'}}>
+          <GridHeader dates={dates}/>
+          <tbody>
+            {SLOTS.map(slot=>(
+              <tr key={slot}>
+                <td style={{padding:'2px 8px 2px 0',textAlign:'right',fontSize:'10px',color:'#bbb',whiteSpace:'nowrap',verticalAlign:'middle'}}>{slot}</td>
+                {dates.map((_,di)=>{
+                  const k=`${di}-${slot}`,ids=reqIds(k),insts=reqInsts(k);
+                  const isSel=selCell===k,hasReq=ids.length>0;
+                  return(
+                    <td key={di} style={{padding:'2px'}}>
+                      <button onClick={()=>setSel(isSel?null:k)}
+                        style={{borderRadius:'7px',width:'100%',minHeight:'46px',padding:'3px',background:hasReq?'#fef9ec':'#f5f5f5',
+                          border:isSel?`2px solid ${DARK}`:(hasReq?`2px solid ${GOLD}`:'2px solid transparent'),cursor:'pointer',
+                          display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:'2px'}}>
+                        {hasReq?<><span style={{fontSize:'11px',color:GOLD}}>⭐</span><span style={{fontSize:'9px',fontWeight:'700',color:GOLD,lineHeight:1}}>{insts.map(i=>i.name.charAt(0)).join('・')}</span></>
+                          :<span style={{fontSize:'10px',color:'#ddd'}}>—</span>}
+                      </button>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {selCell&&(()=>{
+        const[diStr,slot]=selCell.split('-');const di=parseInt(diStr);const ids=reqIds(selCell);
+        return(
+          <div style={{background:'white',borderRadius:'14px',padding:'16px',boxShadow:'0 2px 12px rgba(0,0,0,0.08)',border:`2px solid ${GOLD}`}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px'}}>
+              <span style={{fontWeight:'800',fontSize:'14px',color:DARK}}>{DAYS[di]}曜日 {slot} — 指名する講師</span>
+              <button onClick={()=>setSel(null)} style={{background:'none',border:'none',fontSize:'18px',color:'#bbb',cursor:'pointer'}}>✕</button>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:'8px'}}>
+              {instructors.map(inst=>{
+                const on=ids.includes(inst.id);
+                return(
+                  <button key={inst.id} onClick={()=>toggle(selCell,inst.id)}
+                    style={{padding:'13px 16px',borderRadius:'10px',display:'flex',alignItems:'center',justifyContent:'space-between',
+                      background:on?'#fef9ec':'#f5f5f5',border:on?`2px solid ${GOLD}`:'2px solid transparent',cursor:'pointer'}}>
+                    <span style={{fontWeight:'700',fontSize:'14px',color:DARK}}>{inst.name}</span>
+                    <span style={{fontSize:'20px'}}>{on?'⭐':'—'}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {ids.length>0&&<button onClick={()=>{onSetRequest(selCell,[]);setSel(null);}}
+              style={{marginTop:'12px',width:'100%',padding:'10px',borderRadius:'8px',background:'#fee2e2',color:'#dc2626',border:'none',cursor:'pointer',fontWeight:'700',fontSize:'12px'}}>
+              この枠の指名をすべて解除
+            </button>}
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+// ── ConfirmTab ─────────────────────────────────────────────────────
+function ConfirmTab({instructors,weekOffset,dates,avail,confirmed,isConfirmed,onToggle,onConfirmWeek}){
+  const totalConf=Object.values(confirmed).flat().length;
+  const entries=[];
+  for(let di=0;di<7;di++){
+    for(const slot of SLOTS){
+      const k=`${di}-${slot}`;
+      const ok=instructors.filter(i=>avail[i.id]?.[k]==='ok');
+      if(ok.length>0) entries.push({di,slot,k,ok,confIds:confirmed[k]||[]});
+    }
+  }
+  return(
+    <div style={{padding:'16px'}}>
+      {isConfirmed
+        ?<div style={{background:'#dcfce7',borderRadius:'10px',padding:'14px',marginBottom:'14px',textAlign:'center',border:'1px solid #bbf7d0'}}>
+           <div style={{fontSize:'16px',fontWeight:'800',color:'#16a34a'}}>✅ シフト確定済み</div>
+           <div style={{fontSize:'12px',color:'#16a34a',marginTop:'4px'}}>講師側に確定済みとして表示されています</div>
+         </div>
+        :<div style={{background:'#fef9ec',borderRadius:'10px',padding:'12px 14px',marginBottom:'14px',fontSize:'12px',color:'#8a6e1a',lineHeight:'1.7',border:'1px solid #f0d980'}}>
+           入れると回答した講師名が表示されます。名前をタップして担当者を確定（金色）にしてください。
+         </div>
+      }
+      {entries.length===0
+        ?<div style={{textAlign:'center',color:'#ccc',padding:'40px',fontSize:'13px',background:'white',borderRadius:'14px'}}>まだシフト入力がありません</div>
+        :entries.map(({di,slot,k,ok,confIds})=>(
+          <div key={k} style={{background:'white',borderRadius:'12px',padding:'14px 16px',marginBottom:'10px',boxShadow:'0 1px 6px rgba(0,0,0,0.05)'}}>
+            <div style={{fontSize:'12px',fontWeight:'700',color:'#888',marginBottom:'10px'}}>{DAYS[di]}曜日（{fmt(dates[di])}）{slot}</div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:'8px'}}>
+              {ok.map(inst=>{
+                const isCon=confIds.includes(inst.id);
+                return(
+                  <button key={inst.id} onClick={()=>!isConfirmed&&onToggle(k,inst.id)}
+                    style={{padding:'9px 18px',borderRadius:'20px',fontWeight:'700',fontSize:'13px',
+                      background:isCon?GOLD:'#dcfce7',color:isCon?'white':'#16a34a',border:'none',
+                      cursor:isConfirmed?'default':'pointer',display:'flex',alignItems:'center',gap:'5px',
+                      boxShadow:isCon?'0 2px 8px rgba(201,168,76,0.3)':'none',transition:'all 0.15s'}}>
+                    {isCon&&'✓ '}{inst.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))
+      }
+      {!isConfirmed&&(
+        <button onClick={onConfirmWeek}
+          style={{width:'100%',padding:'16px',borderRadius:'12px',fontWeight:'800',fontSize:'16px',marginTop:'8px',
+            background:totalConf>0?DARK:'#ccc',color:'white',border:'none',cursor:totalConf>0?'pointer':'default',
+            boxShadow:totalConf>0?'0 4px 16px rgba(0,0,0,0.15)':'none'}}>
+          ✅ このシフトを確定する
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── ManageTab ──────────────────────────────────────────────────────
+function ManageTab({instructors}){
+  const [name,setName]     = useState('');
+  const [pw,setPw]         = useState('');
+  const [pw2,setPw2]       = useState('');
+  const [busy,setBusy]     = useState(false);
+  const [msg,setMsg]       = useState('');
+  const [isErr,setIsErr]   = useState(false);
+  const [added,setAdded]   = useState(null); // 追加完了した講師情報
+  const nameRef = useRef(null);
+
+  const showMsg=(t,e)=>{setMsg(t);setIsErr(!!e);};
+
+  const add = async () => {
+    if(!name.trim()){showMsg('名前を入力してください',true);return;}
+    if(pw.length<6){showMsg('パスワードは6文字以上にしてください',true);return;}
+    if(pw!==pw2){showMsg('パスワードが一致しません',true);return;}
+    setBusy(true);setMsg('');
+    let docRef=null;
+    try {
+      // 1. Firestore にドキュメント作成
+      docRef = await fs.addInstructor(name.trim());
+      // 2. Firebase Auth アカウント作成（セカンダリアプリ経由）
+      await createInstAuth(docRef.id, pw);
+      setAdded({name:name.trim(),pw});
+      setName('');setPw('');setPw2('');
+      setTimeout(()=>nameRef.current?.focus(),100);
+    } catch(e) {
+      // Auth 失敗時は Firestore も削除
+      if(docRef) await fs.deleteInstructor(docRef.id);
+      showMsg(e.code==='auth/email-already-in-use'?'このIDは既に使用されています。一度削除して再登録してください':'登録に失敗しました: '+e.message,true);
+    }
+    setBusy(false);
+  };
+
+  const del = async (id,name) => {
+    if(!window.confirm(`「${name}」を削除しますか？\n※Firebaseのデータを削除します（認証アカウントはFirebaseコンソールから別途削除してください）`)) return;
+    await fs.deleteInstructor(id);
+  };
+
+  return(
+    <div style={{padding:'16px'}}>
+      {/* 追加フォーム */}
+      <div style={{background:'white',borderRadius:'14px',padding:'18px',marginBottom:'16px',boxShadow:'0 2px 12px rgba(0,0,0,0.05)'}}>
+        <div style={{fontSize:'13px',fontWeight:'800',color:DARK,marginBottom:'12px'}}>＋ 講師を追加</div>
+        <input ref={nameRef} value={name} onChange={e=>{setName(e.target.value);setMsg('');}}
+          placeholder="講師の名前" style={{width:'100%',padding:'11px 14px',borderRadius:'10px',border:'1.5px solid #e8e8e8',fontSize:'14px',outline:'none',color:DARK,marginBottom:'8px'}}/>
+        <input type="password" value={pw} onChange={e=>{setPw(e.target.value);setMsg('');}}
+          placeholder="初期パスワード（6文字以上）" style={{width:'100%',padding:'11px 14px',borderRadius:'10px',border:'1.5px solid #e8e8e8',fontSize:'14px',outline:'none',color:DARK,marginBottom:'8px'}}/>
+        <div style={{display:'flex',gap:'8px'}}>
+          <input type="password" value={pw2} onChange={e=>{setPw2(e.target.value);setMsg('');}}
+            onKeyDown={e=>e.key==='Enter'&&add()}
+            placeholder="初期パスワード（確認）" style={{flex:1,padding:'11px 14px',borderRadius:'10px',border:'1.5px solid #e8e8e8',fontSize:'14px',outline:'none',color:DARK}}/>
+          <button onClick={add} disabled={busy}
+            style={{padding:'11px 20px',borderRadius:'10px',background:busy?'#888':DARK,color:'white',border:'none',cursor:busy?'default':'pointer',fontWeight:'800',fontSize:'14px',whiteSpace:'nowrap'}}>
+            {busy?'登録中':'追加'}
+          </button>
+        </div>
+        {msg&&<div style={{marginTop:'8px',fontSize:'12px',color:isErr?'#dc2626':'#16a34a',fontWeight:'600'}}>{msg}</div>}
+      </div>
+
+      {/* 追加完了カード */}
+      {added&&(
+        <div style={{background:'#dcfce7',borderRadius:'14px',padding:'16px',marginBottom:'16px',border:'1px solid #bbf7d0'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}}>
+            <div style={{fontWeight:'800',color:'#16a34a',fontSize:'14px'}}>✅ 登録完了</div>
+            <button onClick={()=>setAdded(null)} style={{background:'none',border:'none',color:'#aaa',cursor:'pointer',fontSize:'16px'}}>✕</button>
+          </div>
+          <div style={{fontSize:'13px',color:'#166534',lineHeight:'1.8'}}>
+            <div>名前：<strong>{added.name}</strong></div>
+            <div>初期パスワード：<strong style={{letterSpacing:'2px'}}>{added.pw}</strong></div>
+          </div>
+          <div style={{fontSize:'11px',color:'#16a34a',marginTop:'8px'}}>⬆ このパスワードを本人に伝えてください。本人が後から変更できます。</div>
+        </div>
+      )}
+
+      <div style={{background:'#fef9ec',borderRadius:'10px',padding:'10px 14px',marginBottom:'14px',fontSize:'11px',color:'#8a6e1a',border:'1px solid #f0d980',lineHeight:'1.7'}}>
+        🔑 パスワードを忘れた講師がいる場合は削除して再登録してください。
+      </div>
+
+      <div style={{fontSize:'12px',fontWeight:'700',color:'#888',marginBottom:'10px'}}>登録済み講師 — {instructors.length}名</div>
+      {instructors.length===0
+        ?<div style={{textAlign:'center',color:'#ccc',padding:'32px',fontSize:'13px',background:'white',borderRadius:'14px'}}>まだ登録されていません</div>
+        :instructors.map(inst=>(
+          <div key={inst.id} style={{background:'white',borderRadius:'12px',padding:'14px 16px',boxShadow:'0 1px 6px rgba(0,0,0,0.04)',marginBottom:'8px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+            <span style={{fontWeight:'700',fontSize:'15px',color:DARK}}>{inst.name}</span>
+            <button onClick={()=>del(inst.id,inst.name)}
+              style={{background:'#fee2e2',border:'none',color:'#dc2626',cursor:'pointer',fontSize:'11px',borderRadius:'7px',padding:'6px 10px',fontWeight:'700'}}>
+              削除
+            </button>
+          </div>
+        ))
+      }
+    </div>
+  );
+}
+
+// ── InstructorView ─────────────────────────────────────────────────
+function InstructorView({instructor,weekOffset,onWeekChange,onLogout}){
+  const [instTab,setInstTab]   = useState('shift');
+  const [avail,setAvail]       = useState({});
+  const [requests,setReqs]     = useState({});
+  const [confirmed,setConf]    = useState({});
+  const [isConfirmed,setIsCon] = useState(false);
+  const [defaults,setDefaults] = useState(instructor.defaults||{});
+  const [hasData,setHasData]   = useState(false);
+  const [loading,setLoading]   = useState(true);
+  const dates  = weekDates(weekOffset);
+  const locked = isLocked(weekOffset);
+
+  useEffect(()=>{
+    setLoading(true);setAvail({});setReqs({});setConf({});setIsCon(false);setHasData(false);
+    const wk=weekKey(weekOffset);
+    const u1=db.collection('weekData').doc(wk).onSnapshot(doc=>{
+      if(doc.exists){setReqs(doc.data().requests||{});setConf(doc.data().confirmed||{});setIsCon(!!doc.data().isConfirmed);}
+      else{setReqs({});setConf({});setIsCon(false);}
+    });
+    const u2=db.collection('weekData').doc(wk).collection('availability').doc(instructor.id)
+      .onSnapshot(doc=>{
+        if(doc.exists){setAvail(doc.data().slots||{});setHasData(true);}
+        else{setAvail({});setHasData(false);}
+        setLoading(false);
+      });
+    return()=>{u1();u2();};
+  },[weekOffset,instructor.id]);
+
+  const toggleCell=async(key)=>{
+    if(locked) return;
+    const cur=avail[key];
+    const next=!cur?'ok':cur==='ok'?'ng':null;
+    const updated={...avail};
+    if(next) updated[key]=next;else delete updated[key];
+    setAvail(updated);
+    await fs.saveAvailability(weekKey(weekOffset),instructor.id,updated);
+  };
+
+  const applyDefaults=async()=>{
+    const applied={};
+    Object.keys(defaults).forEach(k=>{if(defaults[k]) applied[k]='ok';});
+    setAvail(applied);setHasData(true);
+    await fs.saveAvailability(weekKey(weekOffset),instructor.id,applied);
+  };
+
+  const toggleDefault=async(k)=>{
+    const next={...defaults};
+    if(next[k]) delete next[k];else next[k]=true;
+    setDefaults(next);
+    await fs.saveDefaults(instructor.id,next);
+  };
+
+  const handleLogout=async()=>{
+    if(!window.confirm('ログアウトしますか？')) return;
+    await signOut();
+  };
+
+  const okC    = Object.values(avail).filter(v=>v==='ok').length;
+  const ngC    = Object.values(avail).filter(v=>v==='ng').length;
+  const myReqs = Object.keys(requests).filter(k=>{const ids=Array.isArray(requests[k])?requests[k]:[];return ids.includes(instructor.id);});
+  const reqM   = myReqs.filter(k=>avail[k]==='ok').length;
+  const reqT   = myReqs.length;
+  const myConf = Object.entries(confirmed).filter(([,ids])=>ids.includes(instructor.id)).map(([k])=>k);
+  const navTop = instTab==='defaults'?'56px':'88px';
+
+  return(
+    <div style={{minHeight:'100svh',background:'#f7f7f5',paddingBottom:'40px'}}>
+      {instTab==='shift'
+        ?<WeekNav weekOffset={weekOffset} onChange={onWeekChange} onBack={handleLogout}
+            title={instructor.name} subtitle="シフト入力" onLogout={handleLogout}/>
+        :<SimpleNav onBack={()=>setInstTab('shift')} title="デフォルト設定" subtitle={`${instructor.name} さん`}/>
+      }
+
+      {isConfirmed&&myConf.length>0&&instTab==='shift'&&(
+        <div style={{background:'#fef9ec',padding:'10px 16px',textAlign:'center',fontSize:'12px',fontWeight:'700',color:GOLD,borderBottom:`1px solid ${GOLD}`}}>
+          ✅ このシフトは確定済み — あなたは {myConf.length}コマ担当です
+        </div>
+      )}
+
+      <div style={{display:'flex',background:'white',borderBottom:'2px solid #eee',position:'sticky',top:navTop,zIndex:10}}>
+        <button onClick={()=>setInstTab('shift')} style={{flex:1,padding:'10px',fontWeight:'700',fontSize:'12px',background:instTab==='shift'?DARK:'white',color:instTab==='shift'?'white':'#888',border:'none',cursor:'pointer'}}>
+          📅 シフト入力
+        </button>
+        <button onClick={()=>setInstTab('defaults')} style={{flex:1,padding:'10px',fontWeight:'700',fontSize:'12px',background:instTab==='defaults'?DARK:'white',color:instTab==='defaults'?'white':'#888',border:'none',cursor:'pointer'}}>
+          ⚙️ デフォルト・PW設定
+        </button>
+      </div>
+
+      {/* シフト入力 */}
+      {instTab==='shift'&&(
+        <div style={{padding:'16px'}}>
+          {locked
+            ?<div style={{background:'#f5f5f5',borderRadius:'10px',padding:'14px',marginBottom:'14px',textAlign:'center',border:'1px solid #e0e0e0'}}>
+               <div style={{fontSize:'18px',marginBottom:'4px'}}>🔒</div>
+               <div style={{fontSize:'13px',fontWeight:'700',color:'#666'}}>入力期限が過ぎました</div>
+               <div style={{fontSize:'11px',color:'#aaa',marginTop:'4px'}}>締め切り：{deadlineStr(weekOffset)}</div>
+             </div>
+            :<div style={{background:'white',borderRadius:'10px',padding:'10px 14px',marginBottom:'12px',fontSize:'11px',color:'#888',lineHeight:'1.8',boxShadow:'0 1px 6px rgba(0,0,0,0.04)'}}>
+               ⏰ 締め切り：<span style={{color:GOLD,fontWeight:'700'}}>{deadlineStr(weekOffset)}</span><br/>
+               タップ：<b style={{color:'#333'}}>未設定</b>→<b style={{color:'#16a34a'}}>○入れる</b>→<b style={{color:'#dc2626'}}>×入れない</b>
+             </div>
+          }
+          {!locked&&(
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',marginBottom:'14px'}}>
+              {[{label:'入れるコマ',val:okC,bg:'#dcfce7',c:'#16a34a'},{label:'入れないコマ',val:ngC,bg:'#fee2e2',c:'#dc2626'},{label:'指名一致',val:`${reqM}/${reqT}`,bg:'#fef9ec',c:GOLD}].map(s=>(
+                <div key={s.label} style={{background:s.bg,borderRadius:'12px',padding:'12px 8px',textAlign:'center'}}>
+                  <div style={{fontSize:'22px',fontWeight:'900',color:s.c,lineHeight:1}}>{s.val}</div>
+                  <div style={{fontSize:'10px',color:s.c,marginTop:'4px',fontWeight:'600'}}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {isConfirmed&&myConf.length>0&&(
+            <div style={{background:'#fef9ec',borderRadius:'12px',padding:'14px',marginBottom:'14px',border:`1px solid ${GOLD}`}}>
+              <div style={{fontSize:'12px',fontWeight:'700',color:GOLD,marginBottom:'8px'}}>✅ 確定したあなたのシフト（{myConf.length}コマ）</div>
+              <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
+                {myConf.map(k=>{const[di,slot]=k.split('-');return<span key={k} style={{background:'white',border:`1px solid ${GOLD}`,color:GOLD,borderRadius:'20px',padding:'3px 10px',fontSize:'11px',fontWeight:'600'}}>{DAYS[parseInt(di)]} {slot}</span>;})}
+              </div>
+            </div>
+          )}
+          {!locked&&!hasData&&Object.keys(defaults).length>0&&!loading&&(
+            <button onClick={applyDefaults}
+              style={{width:'100%',padding:'14px',borderRadius:'10px',marginBottom:'12px',background:'white',border:`2px solid ${GOLD}`,color:GOLD,fontWeight:'700',fontSize:'13px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:'8px'}}>
+              ⚡ デフォルト設定から入力する
+            </button>
+          )}
+          {loading
+            ?<div style={{textAlign:'center',color:'#bbb',padding:'32px',fontSize:'13px'}}>読み込み中...</div>
+            :<div style={{background:'white',borderRadius:'14px',padding:'14px',overflowX:'auto',boxShadow:'0 2px 12px rgba(0,0,0,0.05)'}}>
+               <table style={{borderCollapse:'collapse',width:'100%',minWidth:'360px'}}>
+                 <GridHeader dates={dates}/>
+                 <tbody>
+                   {SLOTS.map(slot=>(
+                     <tr key={slot}>
+                       <td style={{padding:'2px 8px 2px 0',textAlign:'right',fontSize:'10px',color:'#bbb',whiteSpace:'nowrap',verticalAlign:'middle'}}>{slot}</td>
+                       {dates.map((_,di)=>{
+                         const k=`${di}-${slot}`;
+                         const val=avail[k];
+                         const rArr=Array.isArray(requests[k])?requests[k]:[];
+                         const isReq=rArr.includes(instructor.id);
+                         const isConf=(confirmed[k]||[]).includes(instructor.id);
+                         let bg,c,text;
+                         if(isConf){bg='#fef9ec';c=GOLD;text='✅';}
+                         else if(val==='ok'){bg='#dcfce7';c='#16a34a';text='○';}
+                         else if(val==='ng'){bg='#fee2e2';c='#dc2626';text='×';}
+                         else{bg=isReq?'#fef9ec':'#f5f5f5';c='#ccc';text=isReq?'⭐':'';}
+                         return(
+                           <td key={di} style={{padding:'2px'}}>
+                             <button onClick={()=>!locked&&toggleCell(k)}
+                               style={{borderRadius:'7px',width:'100%',minHeight:'42px',padding:'4px',background:bg,
+                                 border:(isReq&&!isConf)?`2.5px solid ${GOLD}`:(isConf?`2px solid ${GOLD}`:'2px solid transparent'),
+                                 cursor:locked?'default':'pointer',fontSize:'18px',fontWeight:'800',color:c,
+                                 display:'flex',alignItems:'center',justifyContent:'center',opacity:locked&&!val&&!isConf?0.5:1}}>
+                               {text}
+                             </button>
+                           </td>
+                         );
+                       })}
+                     </tr>
+                   ))}
+                 </tbody>
+               </table>
+             </div>
+          }
+        </div>
+      )}
+
+      {/* デフォルト設定 + パスワード変更 */}
+      {instTab==='defaults'&&(
+        <div style={{padding:'16px'}}>
+          <div style={{background:'#f0f0f0',borderRadius:'10px',padding:'12px 14px',marginBottom:'14px',fontSize:'12px',color:'#666',lineHeight:'1.8'}}>
+            普段入れる曜日・時間帯を○で設定しておくと、毎週「デフォルトから入力する」ボタンで自動入力できます。
+          </div>
+          <div style={{background:'white',borderRadius:'14px',padding:'14px',overflowX:'auto',boxShadow:'0 2px 12px rgba(0,0,0,0.05)'}}>
+            <table style={{borderCollapse:'collapse',width:'100%',minWidth:'360px'}}>
+              <DayHeader/>
+              <tbody>
+                {SLOTS.map(slot=>(
+                  <tr key={slot}>
+                    <td style={{padding:'2px 8px 2px 0',textAlign:'right',fontSize:'10px',color:'#bbb',whiteSpace:'nowrap',verticalAlign:'middle'}}>{slot}</td>
+                    {DAYS.map((_,di)=>{
+                      const k=`${di}-${slot}`,on=!!defaults[k];
+                      return(
+                        <td key={di} style={{padding:'2px'}}>
+                          <button onClick={()=>toggleDefault(k)}
+                            style={{borderRadius:'7px',width:'100%',minHeight:'42px',padding:'4px',background:on?'#dcfce7':'#f5f5f5',border:on?'2px solid #86efac':'2px solid transparent',cursor:'pointer',fontSize:'18px',fontWeight:'800',color:on?'#16a34a':'#ccc',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                            {on?'○':''}
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{marginTop:'10px',textAlign:'center',fontSize:'11px',color:'#bbb',marginBottom:'4px'}}>
+            ○ = 通常入れる / 空白 = 未設定（自動保存）
+          </div>
+          <PwChangeSection instructor={instructor}/>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── PwChangeSection（Firebase Auth版）────────────────────────────
+function PwChangeSection({instructor}){
+  const [curPw,  setCurPw]  = useState('');
+  const [newPw1, setNewPw1] = useState('');
+  const [newPw2, setNewPw2] = useState('');
+  const [show,   setShow]   = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [done,   setDone]   = useState(false);
+  const [msg,    setMsg]    = useState('');
+  const [isErr,  setIsErr]  = useState(false);
+
+  const showErr = t => { setMsg(t); setIsErr(true); };
+
+  const withTimeout = (p,ms=8000) => Promise.race([p, new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),ms))]);
+
+  const save = async () => {
+    if(!curPw){ showErr('現在のパスワードを入力してください'); return; }
+    if(newPw1.length<6){ showErr('新しいパスワードは6文字以上にしてください'); return; }
+    if(newPw1!==newPw2){ showErr('パスワードが一致しません'); return; }
+    setSaving(true); setMsg('');
+    try {
+      await withTimeout(changeInstPw(instructor.id, curPw, newPw1));
+      setCurPw(''); setNewPw1(''); setNewPw2('');
+      setDone(true);
+    } catch(e) {
+      if(e.message==='timeout') showErr('通信タイムアウト。ネットワークを確認してください');
+      else if(e.code==='auth/wrong-password'||e.code==='auth/invalid-credential') showErr('現在のパスワードが違います');
+      else if(e.code==='auth/requires-recent-login') showErr('セッションが古くなりました。一度ログアウトして再ログインしてください');
+      else showErr('変更に失敗しました: '+e.message);
+    } finally { setSaving(false); }
+  };
+
+  if(done){
+    return(
+      <div style={{marginTop:'20px',background:'#dcfce7',borderRadius:'14px',padding:'28px 20px',textAlign:'center',border:'1px solid #bbf7d0'}}>
+        <div style={{fontSize:'40px',marginBottom:'12px'}}>🔐</div>
+        <div style={{fontSize:'16px',fontWeight:'800',color:'#16a34a',marginBottom:'6px'}}>パスワードを変更しました</div>
+        <div style={{fontSize:'12px',color:'#16a34a',marginBottom:'20px'}}>次回ログインから新しいパスワードを使用してください</div>
+        <button onClick={()=>setDone(false)} style={{padding:'11px 28px',borderRadius:'10px',background:GOLD,color:'white',border:'none',cursor:'pointer',fontWeight:'700',fontSize:'14px'}}>OK</button>
+      </div>
+    );
+  }
+
+  const iStyle={width:'100%',padding:'11px 14px',borderRadius:'10px',border:'1.5px solid #e8e8e8',fontSize:'14px',outline:'none',color:DARK,marginBottom:'8px',background:'white'};
+  const t = show?'text':'password';
+
+  return(
+    <div style={{marginTop:'20px',background:'white',borderRadius:'14px',padding:'18px',boxShadow:'0 2px 12px rgba(0,0,0,0.05)'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px'}}>
+        <div style={{fontSize:'13px',fontWeight:'800',color:DARK}}>🔑 パスワード変更</div>
+        <button onClick={()=>setShow(v=>!v)} style={{background:'none',border:'none',cursor:'pointer',fontSize:'11px',color:'#aaa',textDecoration:'underline'}}>
+          {show?'隠す':'表示'}
+        </button>
+      </div>
+      <input type={t} value={curPw} onChange={e=>{setCurPw(e.target.value);setMsg('');}} placeholder="現在のパスワード" style={iStyle}/>
+      <input type={t} value={newPw1} onChange={e=>{setNewPw1(e.target.value);setMsg('');}} placeholder="新しいパスワード（6文字以上）" style={iStyle}/>
+      <input type={t} value={newPw2} onChange={e=>{setNewPw2(e.target.value);setMsg('');}} onKeyDown={e=>e.key==='Enter'&&save()} placeholder="新しいパスワード（確認）" style={{...iStyle,marginBottom:'10px'}}/>
+      {msg&&<div style={{fontSize:'12px',color:isErr?'#dc2626':'#16a34a',marginBottom:'10px',fontWeight:'600'}}>{msg}</div>}
+      <button onClick={save} disabled={saving}
+        style={{width:'100%',padding:'12px',borderRadius:'10px',background:saving?'#888':DARK,color:'white',border:'none',cursor:saving?'default':'pointer',fontWeight:'700',fontSize:'13px',transition:'background 0.2s'}}>
+        {saving?'変更中...':'パスワードを変更する'}
+      </button>
+      {saving&&<div style={{marginTop:'10px',textAlign:'center',fontSize:'11px',color:'#aaa'}}>Firebaseに接続中です...</div>}
+    </div>
+  );
+}
+
+// ── App root ──────────────────────────────────────────────────────
+function App(){
+  const [authUser,  setAuthUser]  = useState(undefined); // undefined=loading
+  const [instructors,setInsts]   = useState([]);
+  const [instsLoaded,setInstsOK] = useState(false);
+  const [weekOffset, setWeek]    = useState(0);
+  const [loginPage,  setLoginPage]= useState('landing');
+
+  // 認証状態を監視
+  useEffect(()=>{
+    const u = auth.onAuthStateChanged(user => setAuthUser(user||null));
+    return ()=>u();
+  },[]);
+
+  // 講師一覧をリアルタイム取得
+  useEffect(()=>{
+    const u = db.collection('instructors').orderBy('createdAt')
+      .onSnapshot(snap=>{setInsts(snap.docs.map(d=>({id:d.id,...d.data()})));setInstsOK(true);}
+      ,()=>setInstsOK(true));
+    return()=>u();
+  },[]);
+
+  const handleLogout = async () => { await signOut(); setLoginPage('landing'); };
+
+  // ── 認証状態によって表示を切り替え ──
+  if(authUser===undefined) return <Spinner/>;
+
+  // 管理者ログイン済み
+  if(authUser && !isInstMail(authUser.email)){
+    return <AdminView instructors={instructors} weekOffset={weekOffset} onWeekChange={setWeek} onLogout={handleLogout}/>;
+  }
+
+  // 講師ログイン済み
+  if(authUser && isInstMail(authUser.email)){
+    if(!instsLoaded) return <Spinner/>;
+    const instId = instIdFrom(authUser.email);
+    const instructor = instructors.find(i=>i.id===instId);
+    if(!instructor){ signOut(); return <Spinner/>; }
+    let off=0; while(isLocked(off)&&off<4) off++;
+    const initOffset = isLocked(off)?1:off;
+    return <InstructorView instructor={instructor} weekOffset={weekOffset||initOffset} onWeekChange={setWeek} onLogout={handleLogout}/>;
+  }
+
+  // 未ログイン
+  if(loginPage==='admin-login') return <AdminLogin onBack={()=>setLoginPage('landing')}/>;
+  if(loginPage==='inst-login')  return <InstructorLogin instructors={instructors} loading={!instsLoaded} onBack={()=>setLoginPage('landing')}/>;
+  return <Landing onAdmin={()=>setLoginPage('admin-login')} onInstructor={()=>setLoginPage('inst-login')}/>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
