@@ -322,7 +322,7 @@ function AdminLogin({onBack}){
 }
 
 // ── InstructorLogin ──────────────────────────────────────────────
-function InstructorLogin({instructors,loading,onBack}){
+function InstructorLogin({instructors,loading,onBack,onPrepareLogin,onLoginSuccess,onLoginFailed}){
   const [sel,setSel]     = useState(null);
   const [pw,setPw]       = useState('');
   const [err,setErr]     = useState('');
@@ -334,15 +334,22 @@ function InstructorLogin({instructors,loading,onBack}){
   const login = async () => {
     if(!sel||!pw){ setErr('パスワードを入力してください'); return; }
     setBusy(true); setErr('');
+    // onAuthStateChanged が instLogin() 中に先行発火しても
+    // Firestore 取得をスキップさせるため、事前に講師データをセット
+    onPrepareLogin(sel);
     try {
       await instLogin(sel.id, pw);
-      // auth state change → App re-renders automatically
+      // 認証成功 → 講師データを App に渡して画面遷移
+      onLoginSuccess(sel);
     } catch(e) {
-      setErr(e.code==='auth/wrong-password'||e.code==='auth/invalid-credential'
-        ?'パスワードが違います'
-        :'ログインに失敗しました。パスワードを確認してください');
+      onLoginFailed();
+      setErr(
+        e.code==='auth/wrong-password'||e.code==='auth/invalid-credential'
+          ?'パスワードが違います'
+          :'ログインに失敗しました。パスワードを確認してください'
+      );
+      setBusy(false);
     }
-    setBusy(false);
   };
 
   return(
@@ -1084,97 +1091,132 @@ function PwChangeSection({instructor}){
 
 // ── App root ──────────────────────────────────────────────────────
 function App(){
-  const [authState,  setAuthState]  = useState('loading'); // 'loading'|'admin'|'instructor'|'out'
-  const [loggedInInst, setLoggedInInst] = useState(null);  // 講師ログイン時のdoc
-  const [instructors,  setInsts]    = useState([]);
-  const [instsLoaded,  setInstsOK]  = useState(false);
-  const [weekOffset,   setWeek]     = useState(0);
-  const [loginPage,    setLoginPage]= useState('landing');
-  const [authErr,      setAuthErr]  = useState('');
+  const [authState,    setAuthState]   = useState('loading');
+  const [loggedInInst, setLoggedInInst]= useState(null);
+  const [instructors,  setInsts]       = useState([]);
+  const [instsLoaded,  setInstsOK]     = useState(false);
+  const [weekOffset,   setWeek]        = useState(0);
+  const [loginPage,    setLoginPage]   = useState('landing');
 
-  // 認証状態を監視 → ログイン種別を判定してstateに反映
+  // pendingInstRef: instLogin() を呼ぶ直前にセット。
+  // onAuthStateChanged が先に発火しても Firestore 取得をスキップするため。
+  const pendingInstRef  = React.useRef(null);
+  const loggedInInstRef = React.useRef(null);
+
+  // ── 認証監視 ─────────────────────────────────────────────────────
   useEffect(()=>{
     const u = auth.onAuthStateChanged(async user => {
       if(!user){
         setAuthState('out');
         setLoggedInInst(null);
+        loggedInInstRef.current = null;
         return;
       }
+      // 管理者
       if(!isInstMail(user.email)){
-        // 管理者
         setAuthState('admin');
-        setLoggedInInst(null);
         return;
       }
-      // 講師 → Firestoreから直接ドキュメントを取得
-      const instId = instIdFrom(user.email);
-      try {
-        const doc = await db.collection('instructors').doc(instId).get();
-        if(doc.exists){
-          setLoggedInInst({id: doc.id, ...doc.data()});
-          setAuthState('instructor');
-        } else {
-          // Firestoreにドキュメントが存在しない（整合性エラー）
-          setAuthErr('講師データが見つかりません。管理者に連絡してください。');
-          await auth.signOut();
-          setAuthState('out');
-        }
-      } catch(e){
-        setAuthErr('データの読み込みに失敗しました: ' + e.message);
-        await auth.signOut();
-        setAuthState('out');
+      // 講師 ─────────────────────────────────────────────────────────
+      // パターン1: InstructorLogin から pendingInstRef がセット済み
+      //           → Firestore 取得不要。instLogin 後に handleInstLoginSuccess が呼ばれる
+      if(pendingInstRef.current){
+        return; // handleInstLoginSuccess に任せる
       }
+      // パターン2: 既にログイン済み（state 更新の二重発火等）
+      if(loggedInInstRef.current){
+        setLoggedInInst(loggedInInstRef.current);
+        setAuthState('instructor');
+        return;
+      }
+      // パターン3: ページ再読込 → Firestore から取得（リトライ付き）
+      const instId = instIdFrom(user.email);
+      const tryFetch = async (attempt) => {
+        try {
+          const doc = await db.collection('instructors').doc(instId).get();
+          if(doc.exists){
+            const inst = {id: doc.id, ...doc.data()};
+            loggedInInstRef.current = inst;
+            setLoggedInInst(inst);
+            setAuthState('instructor');
+          } else if(attempt < 3){
+            setTimeout(()=>tryFetch(attempt+1), 1200);
+          } else {
+            await auth.signOut();
+            setAuthState('out');
+          }
+        } catch(e){
+          if(attempt < 3) setTimeout(()=>tryFetch(attempt+1), 1000);
+          else { await auth.signOut(); setAuthState('out'); }
+        }
+      };
+      tryFetch(0);
     });
     return ()=>u();
   },[]);
 
-  // 講師一覧（ログイン画面・管理者画面で使用）
+  // 講師一覧（ログイン画面・管理者画面用）
   useEffect(()=>{
     const u = db.collection('instructors').orderBy('createdAt')
       .onSnapshot(
         snap=>{setInsts(snap.docs.map(d=>({id:d.id,...d.data()})));setInstsOK(true);},
-        ()=>{setInstsOK(true);} // エラーでもloading解除
+        ()=>setInstsOK(true)
       );
     return()=>u();
   },[]);
 
   const handleLogout = async () => {
+    pendingInstRef.current  = null;
+    loggedInInstRef.current = null;
     await auth.signOut();
     setLoggedInInst(null);
     setLoginPage('landing');
-    setAuthErr('');
   };
 
-  // ── 画面切り替え ──
+  // InstructorLogin から呼ばれる: instLogin() の直前にセット
+  const handlePrepareLogin = (inst) => {
+    pendingInstRef.current = inst; // onAuthStateChanged が先に発火してもスキップさせる
+  };
+
+  // InstructorLogin から呼ばれる: instLogin() 成功後にセット
+  const handleInstLoginSuccess = (inst) => {
+    pendingInstRef.current  = null;
+    loggedInInstRef.current = inst;
+    setLoggedInInst(inst);
+    setAuthState('instructor');
+  };
+
+  // instLogin() 失敗時のクリア
+  const handleLoginFailed = () => {
+    pendingInstRef.current = null;
+  };
+
+  // ── 画面切り替え ──────────────────────────────────────────────────
   if(authState==='loading') return <Spinner/>;
 
-  if(authState==='admin'){
+  if(authState==='admin')
     return <AdminView instructors={instructors} weekOffset={weekOffset} onWeekChange={setWeek} onLogout={handleLogout}/>;
-  }
 
   if(authState==='instructor'){
-    if(!loggedInInst) return <Spinner/>;
+    const inst = loggedInInst || loggedInInstRef.current;
+    if(!inst) return <Spinner/>;
     let off=0; while(isLocked(off)&&off<4) off++;
-    const initOffset = isLocked(off)?1:off;
-    return <InstructorView instructor={loggedInInst} weekOffset={weekOffset||initOffset} onWeekChange={setWeek} onLogout={handleLogout}/>;
+    return <InstructorView instructor={inst} weekOffset={weekOffset||(isLocked(off)?1:off)} onWeekChange={setWeek} onLogout={handleLogout}/>;
   }
 
   // 未ログイン
-  return (
-    <>
-      {authErr&&(
-        <div style={{background:'#fee2e2',color:'#dc2626',padding:'12px 16px',textAlign:'center',fontSize:'13px',fontWeight:'600',position:'fixed',top:0,left:0,right:0,zIndex:999}}>
-          ⚠️ {authErr}
-          <button onClick={()=>setAuthErr('')} style={{marginLeft:'12px',background:'none',border:'none',cursor:'pointer',color:'#dc2626',fontWeight:'700',fontSize:'15px'}}>✕</button>
-        </div>
-      )}
-      {loginPage==='admin-login' && <AdminLogin onBack={()=>setLoginPage('landing')}/>}
-      {loginPage==='inst-login'  && <InstructorLogin instructors={instructors} loading={!instsLoaded} onBack={()=>setLoginPage('landing')}/>}
-      {loginPage==='landing'     && <Landing onAdmin={()=>setLoginPage('admin-login')} onInstructor={()=>setLoginPage('inst-login')}/>}
-    </>
-  );
+  if(loginPage==='admin-login')
+    return <AdminLogin onBack={()=>setLoginPage('landing')}/>;
+  if(loginPage==='inst-login')
+    return <InstructorLogin
+      instructors={instructors} loading={!instsLoaded}
+      onBack={()=>setLoginPage('landing')}
+      onPrepareLogin={handlePrepareLogin}
+      onLoginSuccess={handleInstLoginSuccess}
+      onLoginFailed={handleLoginFailed}
+    />;
+  return <Landing onAdmin={()=>setLoginPage('admin-login')} onInstructor={()=>setLoginPage('inst-login')}/>;
 }
-
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 </body>
