@@ -17,7 +17,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js"></script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
     body{font-family:-apple-system,'Hiragino Sans','Noto Sans JP',sans-serif;background:#fafaf8;}
@@ -493,7 +493,7 @@ function AdminView({instructors,weekOffset,onWeekChange,onLogout}){
   };
 
   const cancelConfirm = async () => {
-    if(!window.confirm('確定を解除しますか？\n講師側の「確定済み」表示が消え、再調整できるようになります。')) return;
+    if(!window.confirm('確定を解除しますか？\n講師側の確定済み表示が消え、再調整できます。')) return;
     await fs.setWeekConfirmed(weekKey(weekOffset),false);
   };
 
@@ -1121,8 +1121,8 @@ function App(){
 
   // pendingInstRef: instLogin() を呼ぶ直前にセット。
   // onAuthStateChanged が先に発火しても Firestore 取得をスキップするため。
-  const pendingInstRef  = React.useRef(null);
-  const loggedInInstRef = React.useRef(null);
+  const pendingInstRef  = useRef(null);
+  const loggedInInstRef = useRef(null);
 
   // ── 認証監視 ─────────────────────────────────────────────────────
   useEffect(()=>{
