@@ -837,7 +837,7 @@ function ManageTab({instructors}){
 }
 
 // ── InstructorView ─────────────────────────────────────────────────
-function InstructorView({instructor,weekOffset,onWeekChange,onLogout}){
+function InstructorView({instructor,instructors=[],weekOffset,onWeekChange,onLogout}){
   const [instTab,setInstTab]   = useState('shift');
   const [avail,setAvail]       = useState({});
   const [requests,setReqs]     = useState({});
@@ -925,82 +925,138 @@ function InstructorView({instructor,weekOffset,onWeekChange,onLogout}){
         </button>
       </div>
 
-      {/* シフト入力 */}
+      {/* シフト入力 / 確定済み閲覧 */}
       {instTab==='shift'&&(
         <div style={{padding:'16px'}}>
-          {locked
-            ?<div style={{background:'#f5f5f5',borderRadius:'10px',padding:'14px',marginBottom:'14px',textAlign:'center',border:'1px solid #e0e0e0'}}>
-               <div style={{fontSize:'18px',marginBottom:'4px'}}>🔒</div>
-               <div style={{fontSize:'13px',fontWeight:'700',color:'#666'}}>入力期限が過ぎました</div>
-               <div style={{fontSize:'11px',color:'#aaa',marginTop:'4px'}}>締め切り：{deadlineStr(weekOffset)}</div>
-             </div>
-            :<div style={{background:'white',borderRadius:'10px',padding:'10px 14px',marginBottom:'12px',fontSize:'11px',color:'#888',lineHeight:'1.8',boxShadow:'0 1px 6px rgba(0,0,0,0.04)'}}>
-               ⏰ 締め切り：<span style={{color:GOLD,fontWeight:'700'}}>{deadlineStr(weekOffset)}</span><br/>
-               タップ：<b style={{color:'#333'}}>未設定</b>→<b style={{color:'#16a34a'}}>○入れる</b>→<b style={{color:'#dc2626'}}>×入れない</b>
-             </div>
-          }
-          {!locked&&(
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',marginBottom:'14px'}}>
-              {[{label:'入れるコマ',val:okC,bg:'#dcfce7',c:'#16a34a'},{label:'入れないコマ',val:ngC,bg:'#fee2e2',c:'#dc2626'},{label:'指名一致',val:`${reqM}/${reqT}`,bg:'#fef9ec',c:GOLD}].map(s=>(
-                <div key={s.label} style={{background:s.bg,borderRadius:'12px',padding:'12px 8px',textAlign:'center'}}>
-                  <div style={{fontSize:'22px',fontWeight:'900',color:s.c,lineHeight:1}}>{s.val}</div>
-                  <div style={{fontSize:'10px',color:s.c,marginTop:'4px',fontWeight:'600'}}>{s.label}</div>
+
+          {/* ── 過去確定週：確定済みスケジュール表示 ── */}
+          {locked&&isConfirmed&&(
+            <div style={{marginBottom:'14px'}}>
+              <div style={{background:'#fef9ec',borderRadius:'12px',padding:'16px',border:`2px solid ${GOLD}`,marginBottom:'12px'}}>
+                <div style={{fontSize:'14px',fontWeight:'800',color:GOLD,marginBottom:'10px'}}>✅ 確定済みシフト</div>
+                {myConf.length>0
+                  ?<>
+                    <div style={{fontSize:'12px',color:'#888',marginBottom:'8px'}}>あなたの担当（{myConf.length}コマ）</div>
+                    <div style={{display:'flex',flexWrap:'wrap',gap:'6px',marginBottom:'12px'}}>
+                      {myConf.map(k=>{const[di,slot]=k.split('-');return(
+                        <span key={k} style={{background:GOLD,color:'white',borderRadius:'20px',padding:'5px 12px',fontSize:'12px',fontWeight:'700'}}>
+                          {DAYS[parseInt(di)]} {slot}
+                        </span>
+                      );})}
+                    </div>
+                  </>
+                  :<div style={{fontSize:'12px',color:'#aaa',marginBottom:'12px'}}>この週はあなたの担当シフトはありません</div>
+                }
+                {/* 週全体の確定状況 */}
+                <div style={{fontSize:'12px',color:'#888',marginBottom:'6px'}}>週全体の確定コマ</div>
+                <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
+                  {SLOTS.map(slot=>
+                    DAYS.map((_,di)=>{
+                      const k=`${di}-${slot}`;
+                      const confIds=confirmed[k]||[];
+                      if(confIds.length===0) return null;
+                      const isMySlot=confIds.includes(instructor.id);
+                      return(
+                        <span key={k} style={{
+                          background:isMySlot?GOLD:'#e8e0cc',
+                          color:isMySlot?'white':'#888',
+                          borderRadius:'16px',padding:'3px 10px',fontSize:'11px',fontWeight:'600'
+                        }}>
+                          {DAYS[di]} {slot}
+                          {confIds.length>1&&` (${confIds.length}名)`}
+                        </span>
+                      );
+                    })
+                  )}
                 </div>
-              ))}
-            </div>
-          )}
-          {isConfirmed&&myConf.length>0&&(
-            <div style={{background:'#fef9ec',borderRadius:'12px',padding:'14px',marginBottom:'14px',border:`1px solid ${GOLD}`}}>
-              <div style={{fontSize:'12px',fontWeight:'700',color:GOLD,marginBottom:'8px'}}>✅ 確定したあなたのシフト（{myConf.length}コマ）</div>
-              <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
-                {myConf.map(k=>{const[di,slot]=k.split('-');return<span key={k} style={{background:'white',border:`1px solid ${GOLD}`,color:GOLD,borderRadius:'20px',padding:'3px 10px',fontSize:'11px',fontWeight:'600'}}>{DAYS[parseInt(di)]} {slot}</span>;})}
               </div>
             </div>
           )}
-          {!locked&&!hasData&&Object.keys(defaults).length>0&&!loading&&(
-            <button onClick={applyDefaults}
-              style={{width:'100%',padding:'14px',borderRadius:'10px',marginBottom:'12px',background:'white',border:`2px solid ${GOLD}`,color:GOLD,fontWeight:'700',fontSize:'13px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:'8px'}}>
-              ⚡ デフォルト設定から入力する
-            </button>
+
+          {/* ── 過去未確定週 ── */}
+          {locked&&!isConfirmed&&(
+            <div style={{background:'#f5f5f5',borderRadius:'10px',padding:'16px',marginBottom:'14px',textAlign:'center',border:'1px solid #e0e0e0'}}>
+              <div style={{fontSize:'20px',marginBottom:'6px'}}>📋</div>
+              <div style={{fontSize:'13px',fontWeight:'700',color:'#666'}}>この週のシフトは確定されていません</div>
+              <div style={{fontSize:'11px',color:'#aaa',marginTop:'4px'}}>締め切り：{deadlineStr(weekOffset)}</div>
+            </div>
           )}
-          {loading
-            ?<div style={{textAlign:'center',color:'#bbb',padding:'32px',fontSize:'13px'}}>読み込み中...</div>
-            :<div style={{background:'white',borderRadius:'14px',padding:'14px',overflowX:'auto',boxShadow:'0 2px 12px rgba(0,0,0,0.05)'}}>
-               <table style={{borderCollapse:'collapse',width:'100%',minWidth:'360px'}}>
-                 <GridHeader dates={dates}/>
-                 <tbody>
-                   {SLOTS.map(slot=>(
-                     <tr key={slot}>
-                       <td style={{padding:'2px 8px 2px 0',textAlign:'right',fontSize:'10px',color:'#bbb',whiteSpace:'nowrap',verticalAlign:'middle'}}>{slot}</td>
-                       {dates.map((_,di)=>{
-                         const k=`${di}-${slot}`;
-                         const val=avail[k];
-                         const rArr=Array.isArray(requests[k])?requests[k]:[];
-                         const isReq=rArr.includes(instructor.id);
-                         const isConf=(confirmed[k]||[]).includes(instructor.id);
-                         let bg,c,text;
-                         if(isConf){bg='#fef9ec';c=GOLD;text='✅';}
-                         else if(val==='ok'){bg='#dcfce7';c='#16a34a';text='○';}
-                         else if(val==='ng'){bg='#fee2e2';c='#dc2626';text='×';}
-                         else{bg=isReq?'#fef9ec':'#f5f5f5';c='#ccc';text=isReq?'⭐':'';}
-                         return(
-                           <td key={di} style={{padding:'2px'}}>
-                             <button onClick={()=>!locked&&toggleCell(k)}
-                               style={{borderRadius:'7px',width:'100%',minHeight:'42px',padding:'4px',background:bg,
-                                 border:(isReq&&!isConf)?`2.5px solid ${GOLD}`:(isConf?`2px solid ${GOLD}`:'2px solid transparent'),
-                                 cursor:locked?'default':'pointer',fontSize:'18px',fontWeight:'800',color:c,
-                                 display:'flex',alignItems:'center',justifyContent:'center',opacity:locked&&!val&&!isConf?0.5:1}}>
-                               {text}
-                             </button>
-                           </td>
-                         );
-                       })}
-                     </tr>
-                   ))}
-                 </tbody>
-               </table>
-             </div>
-          }
+
+          {/* ── 今後の週：入力UI ── */}
+          {!locked&&(
+            <>
+              <div style={{background:'white',borderRadius:'10px',padding:'10px 14px',marginBottom:'12px',fontSize:'11px',color:'#888',lineHeight:'1.8',boxShadow:'0 1px 6px rgba(0,0,0,0.04)'}}>
+                ⏰ 締め切り：<span style={{color:GOLD,fontWeight:'700'}}>{deadlineStr(weekOffset)}</span><br/>
+                タップ：<b style={{color:'#333'}}>未設定</b>→<b style={{color:'#16a34a'}}>○入れる</b>→<b style={{color:'#dc2626'}}>×入れない</b>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',marginBottom:'14px'}}>
+                {[{label:'入れるコマ',val:okC,bg:'#dcfce7',c:'#16a34a'},{label:'入れないコマ',val:ngC,bg:'#fee2e2',c:'#dc2626'},{label:'指名一致',val:`${reqM}/${reqT}`,bg:'#fef9ec',c:GOLD}].map(s=>(
+                  <div key={s.label} style={{background:s.bg,borderRadius:'12px',padding:'12px 8px',textAlign:'center'}}>
+                    <div style={{fontSize:'22px',fontWeight:'900',color:s.c,lineHeight:1}}>{s.val}</div>
+                    <div style={{fontSize:'10px',color:s.c,marginTop:'4px',fontWeight:'600'}}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+              {isConfirmed&&myConf.length>0&&(
+                <div style={{background:'#fef9ec',borderRadius:'12px',padding:'14px',marginBottom:'14px',border:`1px solid ${GOLD}`}}>
+                  <div style={{fontSize:'12px',fontWeight:'700',color:GOLD,marginBottom:'8px'}}>✅ 確定したあなたのシフト（{myConf.length}コマ）</div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
+                    {myConf.map(k=>{const[di,slot]=k.split('-');return<span key={k} style={{background:'white',border:`1px solid ${GOLD}`,color:GOLD,borderRadius:'20px',padding:'3px 10px',fontSize:'11px',fontWeight:'600'}}>{DAYS[parseInt(di)]} {slot}</span>;})}
+                  </div>
+                </div>
+              )}
+              {!hasData&&Object.keys(defaults).length>0&&!loading&&(
+                <button onClick={applyDefaults}
+                  style={{width:'100%',padding:'14px',borderRadius:'10px',marginBottom:'12px',background:'white',border:`2px solid ${GOLD}`,color:GOLD,fontWeight:'700',fontSize:'13px',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:'8px'}}>
+                  ⚡ デフォルト設定から入力する
+                </button>
+              )}
+            </>
+          )}
+
+          {/* グリッド（今後の週 or 過去週の自分の回答確認） */}
+          {(!locked||!isConfirmed)&&(
+            loading
+              ?<div style={{textAlign:'center',color:'#bbb',padding:'32px',fontSize:'13px'}}>読み込み中...</div>
+              :<div style={{background:'white',borderRadius:'14px',padding:'14px',overflowX:'auto',boxShadow:'0 2px 12px rgba(0,0,0,0.05)'}}>
+                 <div style={{fontSize:'11px',color:'#aaa',marginBottom:'8px'}}>
+                   {locked?'あなたの回答（参照のみ）':''}
+                 </div>
+                 <table style={{borderCollapse:'collapse',width:'100%',minWidth:'360px'}}>
+                   <GridHeader dates={dates}/>
+                   <tbody>
+                     {SLOTS.map(slot=>(
+                       <tr key={slot}>
+                         <td style={{padding:'2px 8px 2px 0',textAlign:'right',fontSize:'10px',color:'#bbb',whiteSpace:'nowrap',verticalAlign:'middle'}}>{slot}</td>
+                         {dates.map((_,di)=>{
+                           const k=`${di}-${slot}`;
+                           const val=avail[k];
+                           const rArr=Array.isArray(requests[k])?requests[k]:[];
+                           const isReq=rArr.includes(instructor.id);
+                           const isConf=(confirmed[k]||[]).includes(instructor.id);
+                           let bg,c,text;
+                           if(isConf){bg='#fef9ec';c=GOLD;text='✅';}
+                           else if(val==='ok'){bg='#dcfce7';c='#16a34a';text='○';}
+                           else if(val==='ng'){bg='#fee2e2';c='#dc2626';text='×';}
+                           else{bg=isReq?'#fef9ec':'#f5f5f5';c='#ccc';text=isReq?'⭐':'';}
+                           return(
+                             <td key={di} style={{padding:'2px'}}>
+                               <button onClick={()=>!locked&&toggleCell(k)}
+                                 style={{borderRadius:'7px',width:'100%',minHeight:'42px',padding:'4px',background:bg,
+                                   border:(isReq&&!isConf)?`2.5px solid ${GOLD}`:(isConf?`2px solid ${GOLD}`:'2px solid transparent'),
+                                   cursor:locked?'default':'pointer',fontSize:'18px',fontWeight:'800',color:c,
+                                   display:'flex',alignItems:'center',justifyContent:'center',opacity:locked&&!val&&!isConf?0.4:1}}>
+                                 {text}
+                               </button>
+                             </td>
+                           );
+                         })}
+                       </tr>
+                     ))}
+                   </tbody>
+                 </table>
+               </div>
+          )}
         </div>
       )}
 
@@ -1222,7 +1278,7 @@ function App(){
     const inst = loggedInInst || loggedInInstRef.current;
     if(!inst) return <Spinner/>;
     let off=0; while(isLocked(off)&&off<4) off++;
-    return <InstructorView instructor={inst} weekOffset={weekOffset||(isLocked(off)?1:off)} onWeekChange={setWeek} onLogout={handleLogout}/>;
+    return <InstructorView instructor={inst} instructors={instructors} weekOffset={weekOffset||(isLocked(off)?1:off)} onWeekChange={setWeek} onLogout={handleLogout}/>;
   }
 
   // 未ログイン
