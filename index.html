@@ -1215,6 +1215,12 @@ function App(){
             const inst = {id: doc.id, ...doc.data()};
             loggedInInstRef.current = inst;
             setLoggedInInst(inst);
+            // ページ再読込時: まだ weekOffset が初期値(0)ならデフォルト週へ
+            setWeek(prev => {
+              if(prev !== 0) return prev;
+              let o=0; while(isLocked(o)&&o<4) o++;
+              return isLocked(o)?1:o;
+            });
             setAuthState('instructor');
           } else if(attempt < 3){
             setTimeout(()=>tryFetch(attempt+1), 1200);
@@ -1260,6 +1266,9 @@ function App(){
     pendingInstRef.current  = null;
     loggedInInstRef.current = inst;
     setLoggedInInst(inst);
+    // 初期週をセット（最初の入力可能な週、または今週）
+    let off=0; while(isLocked(off)&&off<4) off++;
+    setWeek(isLocked(off)?1:off);
     setAuthState('instructor');
   };
 
@@ -1277,8 +1286,7 @@ function App(){
   if(authState==='instructor'){
     const inst = loggedInInst || loggedInInstRef.current;
     if(!inst) return <Spinner/>;
-    let off=0; while(isLocked(off)&&off<4) off++;
-    return <InstructorView instructor={inst} instructors={instructors} weekOffset={weekOffset||(isLocked(off)?1:off)} onWeekChange={setWeek} onLogout={handleLogout}/>;
+    return <InstructorView instructor={inst} instructors={instructors} weekOffset={weekOffset} onWeekChange={setWeek} onLogout={handleLogout}/>;
   }
 
   // 未ログイン
