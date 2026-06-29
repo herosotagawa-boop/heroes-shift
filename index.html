@@ -929,46 +929,40 @@ function InstructorView({instructor,instructors=[],weekOffset,onWeekChange,onLog
       {instTab==='shift'&&(
         <div style={{padding:'16px'}}>
 
-          {/* ── 過去確定週：確定済みスケジュール表示 ── */}
+          {/* ── 過去確定週：自分の確定シフトをカレンダー形式で表示 ── */}
           {locked&&isConfirmed&&(
             <div style={{marginBottom:'14px'}}>
-              <div style={{background:'#fef9ec',borderRadius:'12px',padding:'16px',border:`2px solid ${GOLD}`,marginBottom:'12px'}}>
-                <div style={{fontSize:'14px',fontWeight:'800',color:GOLD,marginBottom:'10px'}}>✅ 確定済みシフト</div>
-                {myConf.length>0
-                  ?<>
-                    <div style={{fontSize:'12px',color:'#888',marginBottom:'8px'}}>あなたの担当（{myConf.length}コマ）</div>
-                    <div style={{display:'flex',flexWrap:'wrap',gap:'6px',marginBottom:'12px'}}>
-                      {myConf.map(k=>{const[di,slot]=k.split('-');return(
-                        <span key={k} style={{background:GOLD,color:'white',borderRadius:'20px',padding:'5px 12px',fontSize:'12px',fontWeight:'700'}}>
-                          {DAYS[parseInt(di)]} {slot}
-                        </span>
-                      );})}
-                    </div>
-                  </>
-                  :<div style={{fontSize:'12px',color:'#aaa',marginBottom:'12px'}}>この週はあなたの担当シフトはありません</div>
-                }
-                {/* 週全体の確定状況 */}
-                <div style={{fontSize:'12px',color:'#888',marginBottom:'6px'}}>週全体の確定コマ</div>
-                <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
-                  {SLOTS.map(slot=>
-                    DAYS.map((_,di)=>{
-                      const k=`${di}-${slot}`;
-                      const confIds=confirmed[k]||[];
-                      if(confIds.length===0) return null;
-                      const isMySlot=confIds.includes(instructor.id);
-                      return(
-                        <span key={k} style={{
-                          background:isMySlot?GOLD:'#e8e0cc',
-                          color:isMySlot?'white':'#888',
-                          borderRadius:'16px',padding:'3px 10px',fontSize:'11px',fontWeight:'600'
-                        }}>
-                          {DAYS[di]} {slot}
-                          {confIds.length>1&&` (${confIds.length}名)`}
-                        </span>
-                      );
-                    })
-                  )}
+              <div style={{background:'#fef9ec',borderRadius:'12px',padding:'14px',border:`2px solid ${GOLD}`,marginBottom:'12px',textAlign:'center'}}>
+                <div style={{fontSize:'14px',fontWeight:'800',color:GOLD}}>
+                  ✅ 確定済みシフト　{myConf.length>0?`${myConf.length}コマ担当`:'担当なし'}
                 </div>
+              </div>
+              <div style={{background:'white',borderRadius:'14px',padding:'14px',overflowX:'auto',boxShadow:'0 2px 12px rgba(0,0,0,0.05)'}}>
+                <table style={{borderCollapse:'collapse',width:'100%',minWidth:'360px'}}>
+                  <GridHeader dates={dates}/>
+                  <tbody>
+                    {SLOTS.map(slot=>(
+                      <tr key={slot}>
+                        <td style={{padding:'2px 8px 2px 0',textAlign:'right',fontSize:'10px',color:'#bbb',whiteSpace:'nowrap',verticalAlign:'middle'}}>{slot}</td>
+                        {dates.map((_,di)=>{
+                          const k=`${di}-${slot}`;
+                          const isConf=(confirmed[k]||[]).includes(instructor.id);
+                          return(
+                            <td key={di} style={{padding:'2px'}}>
+                              <div style={{borderRadius:'7px',width:'100%',minHeight:'42px',padding:'4px',
+                                background:isConf?'#fef9ec':'#f5f5f5',
+                                border:isConf?`2px solid ${GOLD}`:'2px solid transparent',
+                                display:'flex',alignItems:'center',justifyContent:'center',
+                                fontSize:'18px',fontWeight:'800',color:isConf?GOLD:'#e0e0e0'}}>
+                                {isConf?'✅':''}
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
