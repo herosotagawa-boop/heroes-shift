@@ -68,9 +68,9 @@ function weekKey(offset){
   const d=getMonday(offset);return `wk-${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
 }
 function fmt(d){return `${d.getMonth()+1}/${d.getDate()}`;}
-function getDeadline(o){const m=getMonday(o),w=new Date(m);w.setDate(m.getDate()-5);w.setHours(23,59,59,999);return w;}
-function isLocked(o){return new Date()>getDeadline(o);}
-function deadlineStr(o){const d=getDeadline(o);return `${d.getMonth()+1}/${d.getDate()}（水）23:59`;}
+function getDeadline(o){ return new Date(0); }
+function isLocked(o){ return false; }
+function deadlineStr(o){ return ''; }/${d.getDate()}（水）23:59`;}
 
 // ── Auth ヘルパー ────────────────────────────────────────────────
 const instEmail  = id => `inst_${id}@heroes-shift.app`;
@@ -972,7 +972,6 @@ function InstructorView({instructor,instructors=[],weekOffset,onWeekChange,onLog
             <div style={{background:'#f5f5f5',borderRadius:'10px',padding:'16px',marginBottom:'14px',textAlign:'center',border:'1px solid #e0e0e0'}}>
               <div style={{fontSize:'20px',marginBottom:'6px'}}>📋</div>
               <div style={{fontSize:'13px',fontWeight:'700',color:'#666'}}>この週のシフトは確定されていません</div>
-              <div style={{fontSize:'11px',color:'#aaa',marginTop:'4px'}}>締め切り：{deadlineStr(weekOffset)}</div>
             </div>
           )}
 
@@ -980,7 +979,6 @@ function InstructorView({instructor,instructors=[],weekOffset,onWeekChange,onLog
           {!locked&&(
             <>
               <div style={{background:'white',borderRadius:'10px',padding:'10px 14px',marginBottom:'12px',fontSize:'11px',color:'#888',lineHeight:'1.8',boxShadow:'0 1px 6px rgba(0,0,0,0.04)'}}>
-                ⏰ 締め切り：<span style={{color:GOLD,fontWeight:'700'}}>{deadlineStr(weekOffset)}</span><br/>
                 タップ：<b style={{color:'#333'}}>未設定</b>→<b style={{color:'#16a34a'}}>○入れる</b>→<b style={{color:'#dc2626'}}>×入れない</b>
               </div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',marginBottom:'14px'}}>
